@@ -12,6 +12,8 @@ Phase 1（本地骨架）、Phase 2（鉴权 + 配额 + DeepSeek 代理）、Pha
 - **多 provider 注册表**：服务端 `providers.ts` 从只支持 DeepSeek 扩到 DeepSeek + Qwen + Zhipu GLM + Moonshot Kimi。commit `ab0651a`。
 - **Sidebar 同步状态角标**：v0.1 版本号旁边显示 pulling/pushing spinner，失败显示 CloudOff 图标。commit `dea6c9a`。
 - **startSync 双触发修复**：React.StrictMode 下的 useEffect 双调用用 in-flight promise 合并。commit `ba1b9dc`（含在 initial commit 里）。
+- **Projects / Artifacts 同步（原 #1 阻塞级）**：D1 加表 + `/sync/pull|push` 扩展 payload + 客户端 dirty 追踪全部落地；LWW + tombstone 与 conversations 共用一套。commits `14d9463`（projects）、`83ee165`（artifacts）、`b50267b`（LWW 冲突 toast）。
+- **核心路径测试覆盖（原 #5 体验级）**：分三个 commit 补齐。`bb1c737`—store actions 49 个 vitest；`93e8751`—`lib/sync.ts` 22 个（pull/push/debounce/retry）；`test(server)`—服务端 25 个集成测试（node-env + better-sqlite3 D1 shim，跳过 workerd 因为仓库路径含非 ASCII 字符）。测试过程中顺手修掉一个生产 bug：`admin.use('*', requireAdmin)` 因为 sub-app 挂在 `/`，`*` 在 Hono 下匹配所有路径，导致非 admin 用户被锁在 /sync/pull 外——现在 scope 到 `/admin/*`。
 
 **重要修正**：老版本 ROADMAP 里把"Code 模式真工具"列为阻塞级待办是**错的**——`src/lib/desktopTools.ts` 已经通过 Tauri 原生 API 接了 `fs_list_dir` / `fs_read_file` / `fs_stat` / `fs_write_file` / `shell_exec` 五件套，带权限门，Code agent 能真读写文件、跑 shell 命令。那项打磨性的工作移到下面 **#2**。
 
@@ -19,18 +21,7 @@ Phase 1（本地骨架）、Phase 2（鉴权 + 配额 + DeepSeek 代理）、Pha
 
 ## 阻塞级（不做完，"实际可用"就有明显缺口）
 
-### 1. Projects 和 Artifacts 还没同步
-
-- **现状**：Phase 3 只同步了 `conversations + messages`。Projects（项目集合，给对话绑 system prompt + 知识源）和 Artifacts（会话里生成的独立代码/文档块）仍然只存在 `localStorage` 里的 Zustand persist。
-- **证据**：`server/schema.sql` 的 messages 表有注释 `project_id TEXT, -- loose ref; projects aren't synced yet`；`server/src/sync.ts` 里没有 projects / artifacts 任何提及。
-- **后果**：
-  - **Projects**：在机器 A 建的项目，机器 B 登录看不到。
-  - **Artifacts**：机器 A 让模型生成的 HTML/React artifact，机器 B 打开同一会话看不到那个附件——但对话内容都同步了，出现"模型上一句说'见下方'，但下方什么都没有"的诡异状态。
-- **下一步**：
-  1. D1 加 `projects` 和 `artifacts` 表（复用 `updatedAt` + `deletedAt` 的 LWW 模式）。
-  2. `/sync/pull` 和 `/sync/push` 扩展 payload 接收/返回两类新实体。
-  3. 客户端 `applyPulledConversations` 旁边加 `applyPulledProjects` / `applyPulledArtifacts`，store 里加对应的 dirty 追踪。
-  4. 注意 artifact 的 binary 存储策略：规模小就 D1 TEXT 列，未来超过几 MB 再迁 R2。
+_当前无阻塞级待办。原 #1（Projects / Artifacts 同步）已于本 session 完成——见上方"最近完成"。_
 
 ---
 
@@ -58,19 +49,9 @@ Phase 1（本地骨架）、Phase 2（鉴权 + 配额 + DeepSeek 代理）、Pha
 - **后果**：两台机器同时编辑同一会话标题，后保存的赢，前者的修改悄悄消失——用户一脸懵。
 - **下一步**：pull 时如果发现本地 dirty 的 conv 被服务端版本覆盖（比较 `updatedAt`），Toast 提示"该会话已在另一设备修改"，并把本地版本存到"冲突备份"里 1 小时（让用户有机会恢复）。
 
-### 5. 核心路径测试覆盖不足
+### 5. ~~核心路径测试覆盖不足~~ ✅ 完成（见"最近完成"）
 
-- **现状**：`src/lib/` 已有 8 个 Vitest 单元测试（artifacts / tokenEstimate / systemPrompt / conversationSearch / conversationSummary / conversationMarkdown / slashCommands / builtinSkills），**都是纯函数**。
-- **缺口**：
-  - `src/store/useAppStore.ts` 完全没测试（dirty 追踪、LWW 合并、会话 CRUD 都是手测）。
-  - `src/lib/sync.ts` 没测试（pull/push/startSync 的 in-flight 合并、cursor 推进逻辑）。
-  - 服务端 `server/src/` 目录下零测试。
-- **后果**：重构核心同步路径只能靠手测，迟早踩坑。回归 bug 不易第一时间发现。
-- **下一步**：
-  1. Vitest 覆盖 store actions（mock persist，跑 markDirty / apply / delete 流程）。
-  2. Vitest 覆盖 sync.ts（mock `flaudeApi`，验证 startSync 只触发一次 pull+push、push 成功后 cursor 推进）。
-  3. 服务端用 `wrangler dev` 起本地 D1，vitest 跑 `/sync/push` + `/sync/pull` + JWT 中间件的集成测试。
-  4. Playwright E2E 暂缓——Tauri 里跑有坑。
+三步走全部落地：store 49 个、`lib/sync.ts` 22 个、服务端 25 个集成测试，总计 203 客户端 + 25 服务端。服务端测试跑在 node-env 下用 better-sqlite3 shim D1（放弃 `@cloudflare/vitest-pool-workers` 因为仓库路径 `C:\D\4 研究\...` 含非 ASCII 字符会打挂 workerd 的 fallback service）。顺手修掉一个生产 bug：`admin.use('*', requireAdmin)` 在 Hono sub-app 挂 `/` 时 `*` 会匹配全路径，非 admin 用户拉 /sync/pull 会被 403。Playwright E2E 仍暂缓。
 
 ### 6. 全账号数据导出
 
@@ -124,11 +105,11 @@ Phase 1（本地骨架）、Phase 2（鉴权 + 配额 + DeepSeek 代理）、Pha
 | 多 provider 注册表（DeepSeek + Qwen + GLM + Kimi） | ✅ 完成 |
 | Code 模式真工具（fs_\* + shell_exec + Tauri IPC） | ✅ 完成 |
 | Sidebar 同步状态角标 | ✅ 完成 |
-| **Projects / Artifacts 同步** | ⏭️ 下一步（#1 阻塞级） |
-| Code agent 打磨 | 🔜 #2 |
+| **Projects / Artifacts 同步** | ✅ 完成（本 session，commits `14d9463` / `83ee165` / `b50267b`） |
+| store / sync / 服务端测试补齐 | ✅ 完成（本 session，commits `bb1c737` / `93e8751` / `test(server)`） |
+| Code agent 打磨 | 🔜 #2（当前优先级最高） |
 | 网络重试退避 | 🔜 #3 |
 | 多设备冲突 UI | 🔜 #4 |
-| store / sync / 服务端测试补齐 | 🔜 #5 |
 | 全账号导出 | 🔜 #6 |
 | 管理员页刷新 | 🔜 #7 |
 | 部署文档 | 🔜 #8 |
