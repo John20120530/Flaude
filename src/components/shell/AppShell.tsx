@@ -3,6 +3,7 @@ import { useAppStore } from '@/store/useAppStore';
 import Sidebar from './Sidebar';
 import TopBar from './TopBar';
 import ArtifactsPanel from './ArtifactsPanel';
+import ConflictToasts from './ConflictToasts';
 import { cn } from '@/lib/utils';
 
 export default function AppShell() {
@@ -84,6 +85,13 @@ export default function AppShell() {
           )}
         </div>
       </main>
+      {/*
+        Sync conflict toasts. Positioned `fixed` internally, so its place
+        in the JSX tree is cosmetic — last sibling puts it above siblings
+        in the z-stack by default (plus we set z-50). Mounted at shell
+        level so it's visible across all routes.
+      */}
+      <ConflictToasts />
     </div>
   );
 }

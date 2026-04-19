@@ -56,6 +56,32 @@ export interface AuthState {
   loggedInAt: number;
 }
 
+/**
+ * A conflict record is created when a pull brings a server version of a
+ * conversation that overwrites local unpushed edits (dirty + server's
+ * updatedAt ≥ ours). The local copy is stashed here so the user can either
+ * restore it ("actually keep mine") or dismiss ("that other device was right").
+ *
+ * Not persisted: records are transient heads-up signals, not durable state.
+ * If the app restarts with an unresolved conflict, we'd rather silently drop
+ * it than surface a stale toast hours later.
+ *
+ * TTL: 1 hour from `detectedAt`. Expiry is lazy — we filter on read in
+ * applyPulledConversations / selectors; no timer needed.
+ */
+export interface ConflictRecord {
+  conversationId: string;
+  /** Snapshot of the local conversation at the moment it was overwritten. */
+  localCopy: Conversation;
+  /** updatedAt of the server version that won. For showing "diff by X seconds". */
+  serverUpdatedAt: number;
+  /** When we detected this conflict (unix ms). */
+  detectedAt: number;
+}
+
+/** 1 hour. After this, conflict records auto-expire. */
+export const CONFLICT_TTL_MS = 60 * 60 * 1000;
+
 interface AppState {
   // UI state
   theme: Theme;
@@ -136,6 +162,12 @@ interface AppState {
   pendingDeletions: string[];
   syncState: 'idle' | 'pulling' | 'pushing' | 'error';
   syncError: string | null;
+  /**
+   * Unresolved LWW conflicts — see ConflictRecord. Populated by
+   * applyPulledConversations when it detects a dirty conv being overwritten.
+   * Rendered as dismissible Toasts at the app shell.
+   */
+  conflictRecords: ConflictRecord[];
 
   // Actions
   setTheme: (t: Theme) => void;
@@ -242,6 +274,18 @@ interface AppState {
    * is a pull, not an edit.
    */
   applyPulledConversations: (convs: import('@/lib/flaudeApi').SyncConversation[]) => void;
+
+  /**
+   * Dismiss a conflict without restoring — user has acknowledged that the
+   * other device's version is correct. Removes from conflictRecords.
+   */
+  dismissConflict: (conversationId: string) => void;
+  /**
+   * Restore the local copy over the server's version. Replaces the conv,
+   * bumps updatedAt to now (so the next push wins the LWW race), marks it
+   * dirty, and removes the conflict record. User's edit wins.
+   */
+  restoreConflict: (conversationId: string) => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -281,6 +325,7 @@ export const useAppStore = create<AppState>()(
       pendingDeletions: [],
       syncState: 'idle',
       syncError: null,
+      conflictRecords: [],
 
       // UI
       setTheme: (theme) => set({ theme }),
@@ -821,6 +866,7 @@ export const useAppStore = create<AppState>()(
           pendingDeletions: [],
           syncState: 'idle',
           syncError: null,
+          conflictRecords: [],
         }),
 
       // -----------------------------------------------------------------------
@@ -859,12 +905,32 @@ export const useAppStore = create<AppState>()(
           if (pulled.length === 0) return s;
           const byId = new Map(s.conversations.map((c) => [c.id, c]));
           const tombstonedLocally = new Set<string>();
+          // Dirty-at-pull-time: if any of these ids end up losing the LWW
+          // race to the server version, the user had unpushed local edits
+          // that are about to be overwritten. That's a conflict worth
+          // surfacing — record the pre-clobber snapshot so they can restore.
+          const localDirty = new Set(s.dirtyConversationIds);
+          const newConflicts: ConflictRecord[] = [];
+          const now = Date.now();
 
           for (const p of pulled) {
             if (p.deletedAt != null) {
               // Server says this is gone. Drop it locally regardless of
               // whether we had it. We also want to drop any lingering dirty
               // mark for it — pushing a tombstoned conv would re-resurrect it.
+              //
+              // If we had dirty edits on this conv, that's a conflict too —
+              // the user's unpushed changes are about to vanish with the
+              // tombstone.
+              const existing = byId.get(p.id);
+              if (existing && localDirty.has(p.id)) {
+                newConflicts.push({
+                  conversationId: p.id,
+                  localCopy: existing,
+                  serverUpdatedAt: p.updatedAt,
+                  detectedAt: now,
+                });
+              }
               tombstonedLocally.add(p.id);
               byId.delete(p.id);
               continue;
@@ -876,6 +942,17 @@ export const useAppStore = create<AppState>()(
             // we've finished pushing — but a burst of "edit → pull in flight"
             // could stage it.
             if (existing && existing.updatedAt > p.updatedAt) continue;
+
+            // Server version winning. If the local copy had unpushed dirty
+            // edits, snapshot it into a conflict record before we overwrite.
+            if (existing && localDirty.has(p.id)) {
+              newConflicts.push({
+                conversationId: p.id,
+                localCopy: existing,
+                serverUpdatedAt: p.updatedAt,
+                detectedAt: now,
+              });
+            }
 
             const messages: Message[] = (p.messages ?? []).map((m) => {
               const meta = (m.metadata ?? {}) as {
@@ -941,6 +1018,17 @@ export const useAppStore = create<AppState>()(
           // server just canonicalised — we don't want to immediately push
           // state we literally just pulled.
           const pulledIds = new Set(pulled.map((p) => p.id));
+
+          // Expire stale conflict records (>1h) lazily on each pull. If the
+          // user just got a new conflict for the same conv, drop the old
+          // record for that id — the new snapshot supersedes.
+          const newConflictIds = new Set(newConflicts.map((c) => c.conversationId));
+          const keptExistingConflicts = s.conflictRecords.filter(
+            (r) =>
+              now - r.detectedAt < CONFLICT_TTL_MS &&
+              !newConflictIds.has(r.conversationId),
+          );
+
           return {
             conversations: next,
             activeConversationId: activeGone ? null : activeId,
@@ -949,6 +1037,56 @@ export const useAppStore = create<AppState>()(
             ),
             pendingDeletions: s.pendingDeletions.filter(
               (id) => !tombstonedLocally.has(id),
+            ),
+            conflictRecords: [...keptExistingConflicts, ...newConflicts],
+          };
+        }),
+
+      dismissConflict: (conversationId) =>
+        set((s) => ({
+          conflictRecords: s.conflictRecords.filter(
+            (r) => r.conversationId !== conversationId,
+          ),
+        })),
+
+      restoreConflict: (conversationId) =>
+        set((s) => {
+          const record = s.conflictRecords.find(
+            (r) => r.conversationId === conversationId,
+          );
+          if (!record) return s;
+          const now = Date.now();
+          // Bump updatedAt so the next push wins the LWW race against the
+          // server's (older-than-now) version. Without this bump the restore
+          // would push a row that still loses to the server on every pull.
+          const restored: Conversation = {
+            ...record.localCopy,
+            updatedAt: now,
+          };
+          // Upsert the restored conv back in. If the current list still has
+          // an entry with this id (the post-pull server version), replace it;
+          // otherwise append. This also handles the tombstone-conflict case
+          // where the conv was dropped entirely.
+          const idx = s.conversations.findIndex(
+            (c) => c.id === conversationId,
+          );
+          const nextConvs =
+            idx >= 0
+              ? s.conversations.map((c) => (c.id === conversationId ? restored : c))
+              : [...s.conversations, restored];
+          return {
+            conversations: nextConvs,
+            // Also clear any tombstone-push we might have queued — we're
+            // bringing this conv back to life.
+            pendingDeletions: s.pendingDeletions.filter(
+              (id) => id !== conversationId,
+            ),
+            dirtyConversationIds: includeDirty(
+              s.dirtyConversationIds,
+              conversationId,
+            ),
+            conflictRecords: s.conflictRecords.filter(
+              (r) => r.conversationId !== conversationId,
             ),
           };
         }),
