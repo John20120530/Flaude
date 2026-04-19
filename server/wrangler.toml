@@ -1,0 +1,55 @@
+# Cloudflare Workers config. Split from the client (Tauri/Vite) project on
+# purpose — wrangler handles its own TS compilation and bundling, and we don't
+# want the two toolchains fighting over tsconfig or node_modules.
+
+name = "flaude-server"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+# nodejs_compat gives us Buffer + process, which bcryptjs leans on.
+compatibility_flags = ["nodejs_compat"]
+
+# -----------------------------------------------------------------------------
+# D1 binding.
+# First-time setup:
+#   1. `pnpm wrangler d1 create flaude`
+#   2. Copy the `database_id` from the CLI output into the line below.
+#   3. `pnpm db:init` (applies schema.sql to the local dev D1 replica).
+# -----------------------------------------------------------------------------
+[[d1_databases]]
+binding = "DB"
+database_name = "flaude"
+database_id = "581ea3d1-b37c-45f2-8935-e832e47ae21c"
+
+# -----------------------------------------------------------------------------
+# Public config.
+# Secrets (JWT_SECRET, upstream provider keys later) are NOT here — they go
+# in `.dev.vars` locally, or `wrangler secret put NAME` for production.
+# -----------------------------------------------------------------------------
+[vars]
+APP_ENV = "development"
+JWT_ISSUER = "flaude"
+# Default per-user monthly token cap. Can be overridden per-user via the
+# users.monthly_quota_tokens column (NULL = fall back to this default).
+# 300k tokens ≈ 150 solid conversations; tune up/down for your group.
+MONTHLY_QUOTA_TOKENS = "300000"
+
+[env.production.vars]
+APP_ENV = "production"
+JWT_ISSUER = "flaude"
+MONTHLY_QUOTA_TOKENS = "300000"
+
+# Local-dev bindings (cookies without HTTPS, verbose logging, etc.) are
+# handled by APP_ENV=development above — no separate [env.development] block
+# needed since the top-level [vars] IS the development default.
+
+# -----------------------------------------------------------------------------
+# Cron triggers.
+# One job: daily at 03:17 UTC (off-peak for CN users), hard-delete any
+# conversations that have been soft-deleted for >90 days. Handler lives in
+# src/index.ts scheduled(). Pick an odd minute so we're not piling on the :00
+# spike at Cloudflare. For local dev this never fires; test with
+#   pnpm wrangler dev --test-scheduled
+# and then `curl http://127.0.0.1:8787/__scheduled?cron=*+*+*+*+*`.
+# -----------------------------------------------------------------------------
+[triggers]
+crons = ["17 3 * * *"]

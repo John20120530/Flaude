@@ -1,0 +1,46 @@
+[package]
+name = "flaude-app"
+version = "0.1.0"
+description = "Flaude — a Claude-like desktop client for Chinese open-source LLMs"
+edition = "2021"
+rust-version = "1.77"
+
+# The library target holds all our commands. `main.rs` is just the entry
+# point that calls into the lib. This split lets us run the same code on
+# mobile in the future without duplication.
+[lib]
+name = "flaude_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# tokio drives our async file + process commands. `rt-multi-thread` is
+# already pulled by tauri but we name it for clarity.
+tokio = { version = "1", features = [
+  "fs",
+  "io-util",
+  "macros",
+  "process",
+  "rt-multi-thread",
+  "time",
+] }
+# portable-pty wraps the platform PTY APIs (ConPTY on Windows 10+, openpty on
+# Unix) behind a single trait. We spawn a child shell under a PTY, read its
+# output on a background thread, and stream it to the frontend via Tauri
+# events — that's what turns the Terminal tab into a real interactive shell
+# instead of the one-shot `shell_exec` tool the Agent uses.
+portable-pty = "0.8"
+
+[profile.release]
+# Small bundles matter — this is the whole point of Tauri over Electron.
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

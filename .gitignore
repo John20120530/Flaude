@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+!.vscode/launch.json
+.idea/
+
+# Claude Code local state (agent configs, session locks — personal, not project)
+.claude/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*

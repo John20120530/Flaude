@@ -1,0 +1,81 @@
+@import 'highlight.js/styles/github-dark.css';
+@import 'katex/dist/katex.min.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    @apply bg-claude-bg text-claude-ink font-sans antialiased;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  .dark body {
+    @apply bg-night-bg text-night-ink;
+  }
+
+  /* Scrollbar styling — subtle, Claude-like */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.12);
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 0, 0, 0.22);
+    background-clip: padding-box;
+    border: 2px solid transparent;
+  }
+  .dark ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.12);
+    background-clip: padding-box;
+    border: 2px solid transparent;
+  }
+}
+
+@layer components {
+  .btn-ghost {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm
+           text-claude-ink hover:bg-black/5 transition-colors
+           dark:text-night-ink dark:hover:bg-white/5;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium
+           bg-claude-accent text-white hover:bg-claude-accentHover
+           transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .side-item {
+    @apply flex items-center gap-2 px-3 py-2 rounded-lg text-sm
+           text-claude-ink/80 hover:bg-black/5 cursor-pointer
+           transition-colors truncate
+           dark:text-night-ink/80 dark:hover:bg-white/5;
+  }
+
+  .side-item-active {
+    @apply bg-black/5 text-claude-ink dark:bg-white/10 dark:text-night-ink;
+  }
+
+  .chat-bubble-user {
+    @apply bg-claude-surface border border-claude-border rounded-2xl px-4 py-3
+           dark:bg-night-surface dark:border-night-border;
+  }
+
+  .chat-bubble-assistant {
+    @apply px-0 py-2;
+  }
+}

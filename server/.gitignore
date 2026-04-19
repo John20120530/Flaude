@@ -1,0 +1,9 @@
+node_modules/
+.wrangler/
+dist/
+
+# Local secrets — copy .dev.vars.example to .dev.vars and fill in.
+.dev.vars
+
+# Wrangler auth state
+.wrangler-state/

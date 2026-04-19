@@ -1,0 +1,26 @@
+{
+  "name": "flaude-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Flaude backend — auth, LLM proxy, usage accounting. Runs on Cloudflare Workers + D1.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute flaude --local --file=./schema.sql",
+    "db:init:remote": "wrangler d1 execute flaude --remote --file=./schema.sql",
+    "db:migrate": "wrangler d1 execute flaude --local --file=./migrations/001_sync.sql",
+    "db:migrate:remote": "wrangler d1 execute flaude --remote --file=./migrations/001_sync.sql",
+    "db:shell": "wrangler d1 execute flaude --local --command",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "hono": "^4.6.14"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241218.0",
+    "@types/bcryptjs": "^2.4.6",
+    "typescript": "^5.4.5",
+    "wrangler": "^3.99.0"
+  }
+}

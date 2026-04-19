@@ -1,0 +1,321 @@
+/**
+ * Client-side sync manager (Phase 3).
+ *
+ * Drives /sync/pull + /sync/push against the Flaude server. The store owns
+ * the dirty bookkeeping (see useAppStore.dirtyConversationIds and friends);
+ * this module just reads that state, hits the network, and updates the
+ * cursor.
+ *
+ * Responsibilities:
+ *   - pullNow()   — fetch everything since `lastSyncAt` and merge into store.
+ *   - pushNow()   — drain `dirtyConversationIds` + `pendingDeletions`.
+ *   - schedulePush() — debounced wrapper so a burst of edits (streaming reply,
+ *                      rapid renames) collapses into one request.
+ *   - startSync() — first-run orchestration for the auth-gate: pull, then if
+ *                   this is the very first sync (no cursor, but we have local
+ *                   data), seed-push everything.
+ *
+ * What this does NOT do:
+ *   - Poll periodically. Single-device single-user (the common case) doesn't
+ *     need it; multi-device users get fresh data on next login. If that ever
+ *     becomes a real complaint, add a 30s interval here.
+ *   - Retry on network failure with backoff. If a push fails we leave the
+ *     dirty set intact and try again on the next trigger. Good enough for
+ *     a friends-group deployment; revisit if flaky networks become routine.
+ *   - Handle conflict resolution beyond LWW. Server does the real enforcement
+ *     (see server/src/sync.ts "LWW" comments).
+ *
+ * All network calls route through flaudeApi.authFetch, so 401/403 already
+ * auto-drops to the login screen. We never need to check auth inline here.
+ */
+import {
+  FlaudeApiError,
+  syncPull,
+  syncPush,
+  type SyncConversation,
+  type SyncMessage,
+} from '@/lib/flaudeApi';
+import { useAppStore } from '@/store/useAppStore';
+import type { Conversation, Message } from '@/types';
+
+// -----------------------------------------------------------------------------
+// Debounce. 800ms is the compromise between "don't re-push on every streamed
+// token" and "don't make the user stare at 'saving...' for seconds after they
+// rename a conversation". Picked by feel; raise if the server logs are noisy,
+// lower if syncs feel sluggish.
+// -----------------------------------------------------------------------------
+const PUSH_DEBOUNCE_MS = 800;
+
+let pushDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * In-flight guards. Without these, two near-simultaneous pull triggers (login
+ * + focus-restored) would race and each apply the same merge twice. Idempotent
+ * for correctness, wasteful for bandwidth.
+ */
+let pullInFlight: Promise<void> | null = null;
+let pushInFlight: Promise<void> | null = null;
+/**
+ * `startSync` is wired to App.tsx's auth-change useEffect. In React.StrictMode
+ * (dev only, but also any future callsite that re-fires on remount) useEffect
+ * runs twice, so without a guard we'd do pull+seed twice in parallel. The
+ * second run isn't harmful — LWW on the server makes the seed push a no-op —
+ * but it doubles network traffic on every login. Track the in-flight promise
+ * and return it on re-entry, same pattern as pullInFlight/pushInFlight above.
+ */
+let startSyncInFlight: Promise<void> | null = null;
+
+// -----------------------------------------------------------------------------
+// Client-local → wire shape conversion. Kept in this file (not in the store)
+// because it's network-layer concern: the store never touches SyncConversation.
+// -----------------------------------------------------------------------------
+function toWireMessage(m: Message): SyncMessage {
+  // attachments and toolCalls go into metadata_json on the server. We strip
+  // any `data:` base64 blobs from attachments before sending — they're too
+  // big for the wire and the UI already discards them in partialize().
+  const metadata: Record<string, unknown> = {};
+  if (m.attachments && m.attachments.length > 0) {
+    metadata.attachments = m.attachments.map((a) => ({
+      id: a.id,
+      name: a.name,
+      mimeType: a.mimeType,
+      size: a.size,
+      // deliberately drop `data` and `url` — transient per-session.
+    }));
+  }
+  if (m.toolCalls && m.toolCalls.length > 0) {
+    metadata.toolCalls = m.toolCalls;
+  }
+  return {
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    reasoning: m.reasoning ?? null,
+    metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+    modelId: m.modelId ?? null,
+    tokensIn: m.tokensIn ?? null,
+    tokensOut: m.tokensOut ?? null,
+    createdAt: m.createdAt,
+  };
+}
+
+function toWireConversation(c: Conversation): SyncConversation {
+  return {
+    id: c.id,
+    title: c.title,
+    mode: c.mode,
+    pinned: !!c.pinned,
+    starred: !!c.starred,
+    modelId: c.modelId ?? null,
+    projectId: c.projectId ?? null,
+    summary: c.summary ?? null,
+    summaryMessageCount: c.summaryMessageCount ?? null,
+    summarizedAt: c.summarizedAt ?? null,
+    createdAt: c.createdAt,
+    updatedAt: c.updatedAt,
+    // Live conversations push deletedAt=null; deletions go via the deletions[]
+    // array, not via upserts (see deleteConversation in the store).
+    deletedAt: null,
+    messages: c.messages.map(toWireMessage),
+  };
+}
+
+// -----------------------------------------------------------------------------
+// Pull
+// -----------------------------------------------------------------------------
+export async function pullNow(): Promise<void> {
+  if (pullInFlight) return pullInFlight;
+  const store = useAppStore.getState();
+  if (!store.auth) return;
+
+  store.setSyncState('pulling');
+  const since = store.lastSyncAt ?? 0;
+
+  pullInFlight = (async () => {
+    try {
+      const res = await syncPull(since);
+      const s = useAppStore.getState();
+      s.applyPulledConversations(res.conversations);
+      s.setLastSyncAt(res.server_time);
+      s.setSyncState('idle');
+    } catch (err) {
+      const msg =
+        err instanceof FlaudeApiError ? err.message : (err as Error).message;
+      console.error('[sync] pull failed:', msg);
+      useAppStore.getState().setSyncState('error', msg);
+      // Don't rethrow — pull failures shouldn't crash the app. Next trigger
+      // (next login, next manual retry) tries again.
+    } finally {
+      pullInFlight = null;
+    }
+  })();
+
+  return pullInFlight;
+}
+
+// -----------------------------------------------------------------------------
+// Push
+// -----------------------------------------------------------------------------
+export async function pushNow(): Promise<void> {
+  if (pushInFlight) return pushInFlight;
+  const store = useAppStore.getState();
+  if (!store.auth) return;
+
+  const dirtyIds = [...store.dirtyConversationIds];
+  const deletionIds = [...store.pendingDeletions];
+  if (dirtyIds.length === 0 && deletionIds.length === 0) return;
+
+  store.setSyncState('pushing');
+
+  const dirtySet = new Set(dirtyIds);
+  const upserts = store.conversations
+    .filter((c) => dirtySet.has(c.id))
+    .map(toWireConversation);
+
+  pushInFlight = (async () => {
+    try {
+      await syncPush({ upserts, deletions: deletionIds });
+
+      // Only clear what we actually sent — a new edit might have landed
+      // during the in-flight push, which should stay queued for the next
+      // round. Same for new deletions.
+      const s = useAppStore.getState();
+      s.clearDirty(dirtyIds);
+      s.clearPendingDeletions(deletionIds);
+      s.setSyncState('idle');
+
+      // After a successful push, the server now has newer rows than our
+      // cursor. Pulling would return the rows we just pushed (wasted round
+      // trip) UNLESS we advance the cursor locally. We don't have a precise
+      // "what server_time does the server consider those upserts to have"
+      // reading — server uses the client-sent updatedAt, not "now" — so
+      // advancing lastSyncAt past the latest pushed updatedAt is safe: any
+      // concurrent edit from another device will have a later updatedAt
+      // and still come down on the next pull.
+      const maxUpdatedAt = upserts.reduce(
+        (m, c) => (c.updatedAt > m ? c.updatedAt : m),
+        s.lastSyncAt ?? 0,
+      );
+      if (maxUpdatedAt > (s.lastSyncAt ?? 0)) {
+        s.setLastSyncAt(maxUpdatedAt);
+      }
+    } catch (err) {
+      const msg =
+        err instanceof FlaudeApiError ? err.message : (err as Error).message;
+      console.error('[sync] push failed:', msg);
+      useAppStore.getState().setSyncState('error', msg);
+      // dirty/pendingDeletions stay intact; next trigger retries.
+    } finally {
+      pushInFlight = null;
+    }
+  })();
+
+  return pushInFlight;
+}
+
+// -----------------------------------------------------------------------------
+// Debounced push. Call this from the store subscription (below) whenever the
+// dirty set changes.
+// -----------------------------------------------------------------------------
+export function schedulePush(): void {
+  if (pushDebounceTimer) clearTimeout(pushDebounceTimer);
+  pushDebounceTimer = setTimeout(() => {
+    pushDebounceTimer = null;
+    void pushNow();
+  }, PUSH_DEBOUNCE_MS);
+}
+
+// -----------------------------------------------------------------------------
+// First-run orchestration, called by App.tsx after the auth gate flips open.
+// Semantics:
+//   1. Pull to get whatever the server already has.
+//   2. If this was a fresh install (lastSyncAt was null before the pull) AND
+//      we have local conversations the pull didn't cover, seed-push them.
+//      We use "conversations with messages" as the filter so we don't push
+//      empty 新对话 shells.
+//   3. Otherwise: just flush any dirty rows left over from a crashed session.
+// -----------------------------------------------------------------------------
+export async function startSync(): Promise<void> {
+  // Coalesce concurrent calls (e.g. React.StrictMode double-invoking the
+  // auth-change useEffect in dev). Both callers get the same promise back.
+  if (startSyncInFlight) return startSyncInFlight;
+
+  startSyncInFlight = (async () => {
+    try {
+      const before = useAppStore.getState();
+      const isFirstRun = before.lastSyncAt === null;
+      const hadLocalData = before.conversations.some((c) => c.messages.length > 0);
+
+      await pullNow();
+
+      const after = useAppStore.getState();
+      if (after.syncState === 'error') return; // pull failed, don't compound
+
+      if (isFirstRun && hadLocalData) {
+        // Seed: every local conv with content that the pull didn't just replace
+        // gets marked dirty and pushed. We can't just markAllConversationsDirty
+        // because applyPulledConversations cleared the dirty flag for anything
+        // it canonicalised — so we'd be pushing stale versions of server rows.
+        // Cross-reference: only mark convs the server didn't return.
+        const afterIds = new Set(after.conversations.map((c) => c.id));
+        // Find convs that are in the (post-pull) store but that the server
+        // didn't send back — those are the purely-local ones. The ones with
+        // messages are the ones worth pushing.
+        //
+        // NB: applyPulledConversations already dropped dirty marks for any row
+        // the server canonicalised. What we mark here are the convs the server
+        // has never seen.
+        for (const c of after.conversations) {
+          // The server roundtripped convs come back with updatedAt matching
+          // what the server has. Locally-unique convs retain their pre-pull
+          // identity. Rather than trying to distinguish, we just re-mark every
+          // conv with messages that existed before the pull — the server's LWW
+          // guard will no-op the ones that are actually in sync.
+          if (c.messages.length > 0 && afterIds.has(c.id)) {
+            useAppStore.getState().markConversationDirty(c.id);
+          }
+        }
+        await pushNow();
+      } else if (
+        after.dirtyConversationIds.length > 0 ||
+        after.pendingDeletions.length > 0
+      ) {
+        await pushNow();
+      }
+    } finally {
+      startSyncInFlight = null;
+    }
+  })();
+
+  return startSyncInFlight;
+}
+
+// -----------------------------------------------------------------------------
+// Store subscription: whenever the dirty set or pending deletions change,
+// schedule a debounced push. Installing it once at module-import time is
+// fine — the store is a singleton.
+//
+// We compare by reference identity on the array (works because the store's
+// write actions always produce a new array via spread) rather than length,
+// so rapid same-length changes still trigger a push.
+// -----------------------------------------------------------------------------
+let previousDirty: string[] | null = null;
+let previousDeletions: string[] | null = null;
+useAppStore.subscribe((state) => {
+  const dirtyChanged = state.dirtyConversationIds !== previousDirty;
+  const deletionsChanged = state.pendingDeletions !== previousDeletions;
+  previousDirty = state.dirtyConversationIds;
+  previousDeletions = state.pendingDeletions;
+  if (!dirtyChanged && !deletionsChanged) return;
+  // Only schedule when auth is present — otherwise we'd burn a timer on every
+  // edit made while logged out (can't happen in the current auth gate, but
+  // defensive).
+  if (!state.auth) return;
+  if (
+    state.dirtyConversationIds.length === 0 &&
+    state.pendingDeletions.length === 0
+  ) {
+    return;
+  }
+  schedulePush();
+});

@@ -1,0 +1,146 @@
+import { useState } from 'react';
+import {
+  ChevronRight,
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  Clock,
+  Wrench,
+} from 'lucide-react';
+import { cn } from '@/lib/utils';
+import type { ToolCall } from '@/types';
+
+interface Props {
+  call: ToolCall;
+  /**
+   * The tool result (from a paired `role: 'tool'` message). When supplied, the
+   * card lets the user expand to see the full output. When absent, we fall
+   * back to call.result / call.error.
+   */
+  resultContent?: string;
+}
+
+/**
+ * A compact card showing one tool invocation: name, status, and expandable
+ * arguments / result. Mimics Claude's "Using X..." affordance.
+ */
+export default function ToolCallCard({ call, resultContent }: Props) {
+  const [open, setOpen] = useState(false);
+
+  const statusIcon = {
+    pending: <Clock className="w-3.5 h-3.5 text-claude-muted dark:text-night-muted" />,
+    running: <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin" />,
+    success: <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />,
+    error: <XCircle className="w-3.5 h-3.5 text-red-500" />,
+  }[call.status];
+
+  const statusLabel = {
+    pending: '等待',
+    running: '运行中',
+    success: '完成',
+    error: '失败',
+  }[call.status];
+
+  const argsPretty = formatArgs(call.arguments);
+  const displayResult = resultContent ?? call.result ?? call.error ?? '';
+
+  return (
+    <div
+      className={cn(
+        'my-2 rounded-lg border text-sm not-prose overflow-hidden transition-colors',
+        call.status === 'error'
+          ? 'border-red-200 dark:border-red-900/50 bg-red-50/50 dark:bg-red-950/20'
+          : 'border-claude-border dark:border-night-border bg-claude-surface/60 dark:bg-night-surface/60'
+      )}
+    >
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
+      >
+        <ChevronRight
+          className={cn('w-3.5 h-3.5 shrink-0 transition-transform', open && 'rotate-90')}
+        />
+        <Wrench className="w-3.5 h-3.5 text-claude-accent shrink-0" />
+        <span className="font-mono text-xs truncate">
+          <span className="text-claude-accent">{call.name}</span>
+          <span className="text-claude-muted dark:text-night-muted">
+            ({argsSummary(call.arguments)})
+          </span>
+        </span>
+        <div className="ml-auto flex items-center gap-1.5 shrink-0">
+          {statusIcon}
+          <span className="text-xs text-claude-muted dark:text-night-muted">
+            {statusLabel}
+          </span>
+        </div>
+      </button>
+
+      {open && (
+        <div className="px-3 pb-3 pt-1 space-y-2">
+          <Section title="参数">
+            <pre className="text-[11px] font-mono whitespace-pre-wrap break-words p-2 rounded bg-black/[0.04] dark:bg-white/[0.04] text-claude-ink dark:text-night-ink max-h-60 overflow-y-auto">
+              {argsPretty || '(无参数)'}
+            </pre>
+          </Section>
+          {(call.status === 'success' || call.status === 'error') && displayResult && (
+            <Section title={call.status === 'error' ? '错误' : '结果'}>
+              <pre
+                className={cn(
+                  'text-[11px] font-mono whitespace-pre-wrap break-words p-2 rounded max-h-80 overflow-y-auto',
+                  call.status === 'error'
+                    ? 'bg-red-100/60 dark:bg-red-950/30 text-red-800 dark:text-red-200'
+                    : 'bg-black/[0.04] dark:bg-white/[0.04]'
+                )}
+              >
+                {displayResult}
+              </pre>
+            </Section>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-claude-muted dark:text-night-muted mb-1">
+        {title}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/** One-line arg summary for the collapsed header. */
+function argsSummary(args: Record<string, unknown> | unknown): string {
+  if (!args || typeof args !== 'object') return '';
+  const obj = args as Record<string, unknown>;
+  if ('__raw' in obj) return '...'; // mid-stream, not parsed yet
+  const keys = Object.keys(obj);
+  if (keys.length === 0) return '';
+  // Show first arg value truncated, then "+N more"
+  const first = keys[0];
+  const val = obj[first];
+  const valStr =
+    typeof val === 'string'
+      ? `"${val.length > 24 ? val.slice(0, 24) + '…' : val}"`
+      : JSON.stringify(val).slice(0, 28);
+  const rest = keys.length > 1 ? `, +${keys.length - 1}` : '';
+  return `${first}: ${valStr}${rest}`;
+}
+
+/** Pretty-printed JSON for the expanded panel. */
+function formatArgs(args: Record<string, unknown> | unknown): string {
+  if (!args || typeof args !== 'object') return '';
+  const obj = args as Record<string, unknown>;
+  if ('__raw' in obj) {
+    return String((obj as { __raw?: string }).__raw ?? '');
+  }
+  try {
+    return JSON.stringify(obj, null, 2);
+  } catch {
+    return String(obj);
+  }
+}

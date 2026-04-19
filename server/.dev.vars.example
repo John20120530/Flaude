@@ -1,0 +1,17 @@
+# Copy this file to `.dev.vars` and fill in.
+# `.dev.vars` is gitignored; `wrangler dev` reads it automatically.
+#
+# For production, do NOT commit secrets — push them with:
+#   pnpm wrangler secret put JWT_SECRET
+
+# HS256 signing key for JWTs. Minimum ~32 bytes of entropy.
+# Generate: node -e "console.log(require('crypto').randomBytes(48).toString('base64'))"
+JWT_SECRET="replace-me-with-48-random-bytes-base64-encoded"
+
+# DeepSeek API key. Get at https://platform.deepseek.com/api_keys
+# Needed if clients send model=deepseek-chat or deepseek-reasoner.
+DEEPSEEK_API_KEY="sk-..."
+
+# 博查 (BochaAI) Web Search API key. Get at https://open.bochaai.com
+# Shared across all users — omit this line to disable web_search entirely.
+BOCHA_API_KEY="sk-..."
