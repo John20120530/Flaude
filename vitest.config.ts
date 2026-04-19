@@ -22,5 +22,8 @@ export default defineConfig({
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
     globals: false,
     reporters: 'default',
+    // Setup file stubs localStorage so zustand/persist doesn't log warnings
+    // during store tests. Keeps test output clean enough to eyeball.
+    setupFiles: ['./src/test/setup.ts'],
   },
 });
