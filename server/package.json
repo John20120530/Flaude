@@ -10,6 +10,8 @@
     "db:init:remote": "wrangler d1 execute flaude --remote --file=./schema.sql",
     "db:migrate": "wrangler d1 execute flaude --local --file=./migrations/001_sync.sql",
     "db:migrate:remote": "wrangler d1 execute flaude --remote --file=./migrations/001_sync.sql",
+    "db:migrate:projects": "wrangler d1 execute flaude --local --file=./migrations/002_projects.sql",
+    "db:migrate:projects:remote": "wrangler d1 execute flaude --remote --file=./migrations/002_projects.sql",
     "db:shell": "wrangler d1 execute flaude --local --command",
     "typecheck": "tsc --noEmit"
   },

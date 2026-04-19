@@ -160,6 +160,14 @@ interface AppState {
   lastSyncAt: number | null;
   dirtyConversationIds: string[];
   pendingDeletions: string[];
+  /**
+   * Project-side twins of dirtyConversationIds / pendingDeletions. Kept in
+   * parallel (rather than a single dirty-set-of-entities) because the wire
+   * format splits them and the caps differ — projects are much smaller and
+   * we don't want to starve a big conversation push with project rows.
+   */
+  dirtyProjectIds: string[];
+  pendingProjectDeletions: string[];
   syncState: 'idle' | 'pulling' | 'pushing' | 'error';
   syncError: string | null;
   /**
@@ -265,6 +273,12 @@ interface AppState {
   markAllConversationsDirty: () => void;
   clearDirty: (ids: string[]) => void;
   clearPendingDeletions: (ids: string[]) => void;
+  /** Mark a project as having unpushed local edits. */
+  markProjectDirty: (id: string) => void;
+  /** Mark every project dirty. Used by "resync everything" tooling. */
+  markAllProjectsDirty: () => void;
+  clearProjectDirty: (ids: string[]) => void;
+  clearPendingProjectDeletions: (ids: string[]) => void;
   setLastSyncAt: (ts: number | null) => void;
   setSyncState: (state: 'idle' | 'pulling' | 'pushing' | 'error', err?: string | null) => void;
   /**
@@ -274,6 +288,13 @@ interface AppState {
    * is a pull, not an edit.
    */
   applyPulledConversations: (convs: import('@/lib/flaudeApi').SyncConversation[]) => void;
+  /**
+   * Projects pulled from the server. Same LWW + tombstone semantics as
+   * applyPulledConversations. We don't raise a conflict toast for projects
+   * today — their edits are rare and a quiet clobber is acceptable until we
+   * see it bite someone in practice.
+   */
+  applyPulledProjects: (projects: import('@/lib/flaudeApi').SyncProject[]) => void;
 
   /**
    * Dismiss a conflict without restoring — user has acknowledged that the
@@ -323,6 +344,8 @@ export const useAppStore = create<AppState>()(
       lastSyncAt: null,
       dirtyConversationIds: [],
       pendingDeletions: [],
+      dirtyProjectIds: [],
+      pendingProjectDeletions: [],
       syncState: 'idle',
       syncError: null,
       conflictRecords: [],
@@ -606,6 +629,10 @@ export const useAppStore = create<AppState>()(
             ...s.projects,
           ],
           activeProjectId: id,
+          // Mark dirty immediately — unlike conversations we don't care about
+          // empty-draft pollution (a project is always explicitly created via
+          // the UI, and the user expects it to appear on their other device).
+          dirtyProjectIds: includeDirty(s.dirtyProjectIds, id),
         }));
         return id;
       },
@@ -614,6 +641,7 @@ export const useAppStore = create<AppState>()(
           projects: s.projects.map((p) =>
             p.id === id ? { ...p, ...patch, updatedAt: Date.now() } : p
           ),
+          dirtyProjectIds: includeDirty(s.dirtyProjectIds, id),
         })),
       deleteProject: (id) =>
         set((s) => {
@@ -625,6 +653,13 @@ export const useAppStore = create<AppState>()(
             .filter((c) => c.projectId === id)
             .map((c) => c.id);
           const now = Date.now();
+          // Mirror conversation deletion: queue a tombstone push unless the
+          // project was purely local (never been dirty before and therefore
+          // never pushed). A project that was dirty-then-deleted in one
+          // session still gets a tombstone — safer than trying to guess
+          // whether the push ever made it out.
+          const wasEverPushed =
+            !s.dirtyProjectIds.includes(id) || s.lastSyncAt !== null;
           return {
             projects: s.projects.filter((p) => p.id !== id),
             activeProjectId: s.activeProjectId === id ? null : s.activeProjectId,
@@ -635,6 +670,10 @@ export const useAppStore = create<AppState>()(
               includeDirty,
               s.dirtyConversationIds,
             ),
+            dirtyProjectIds: s.dirtyProjectIds.filter((x) => x !== id),
+            pendingProjectDeletions: wasEverPushed
+              ? includeDirty(s.pendingProjectDeletions, id)
+              : s.pendingProjectDeletions,
           };
         }),
       addProjectSource: (projectId, source) =>
@@ -644,6 +683,7 @@ export const useAppStore = create<AppState>()(
               ? { ...p, sources: [...p.sources, source], updatedAt: Date.now() }
               : p
           ),
+          dirtyProjectIds: includeDirty(s.dirtyProjectIds, projectId),
         })),
       removeProjectSource: (projectId, sourceId) =>
         set((s) => ({
@@ -656,6 +696,7 @@ export const useAppStore = create<AppState>()(
                 }
               : p
           ),
+          dirtyProjectIds: includeDirty(s.dirtyProjectIds, projectId),
         })),
 
       // Artifacts
@@ -864,6 +905,8 @@ export const useAppStore = create<AppState>()(
           lastSyncAt: null,
           dirtyConversationIds: [],
           pendingDeletions: [],
+          dirtyProjectIds: [],
+          pendingProjectDeletions: [],
           syncState: 'idle',
           syncError: null,
           conflictRecords: [],
@@ -895,6 +938,27 @@ export const useAppStore = create<AppState>()(
       clearPendingDeletions: (ids) =>
         set((s) => ({
           pendingDeletions: s.pendingDeletions.filter((id) => !ids.includes(id)),
+        })),
+      markProjectDirty: (id) =>
+        set((s) => {
+          if (s.dirtyProjectIds.includes(id)) return s;
+          return { dirtyProjectIds: [...s.dirtyProjectIds, id] };
+        }),
+      markAllProjectsDirty: () =>
+        set((s) => {
+          const ids = s.projects.map((p) => p.id);
+          const merged = new Set([...s.dirtyProjectIds, ...ids]);
+          return { dirtyProjectIds: [...merged] };
+        }),
+      clearProjectDirty: (ids) =>
+        set((s) => ({
+          dirtyProjectIds: s.dirtyProjectIds.filter((id) => !ids.includes(id)),
+        })),
+      clearPendingProjectDeletions: (ids) =>
+        set((s) => ({
+          pendingProjectDeletions: s.pendingProjectDeletions.filter(
+            (id) => !ids.includes(id),
+          ),
         })),
       setLastSyncAt: (ts) => set({ lastSyncAt: ts }),
       setSyncState: (state, err = null) =>
@@ -1042,6 +1106,91 @@ export const useAppStore = create<AppState>()(
           };
         }),
 
+      applyPulledProjects: (pulled) =>
+        set((s) => {
+          if (pulled.length === 0) return s;
+          const byId = new Map(s.projects.map((p) => [p.id, p]));
+          const tombstonedLocally = new Set<string>();
+
+          for (const p of pulled) {
+            if (p.deletedAt != null) {
+              tombstonedLocally.add(p.id);
+              byId.delete(p.id);
+              continue;
+            }
+
+            const existing = byId.get(p.id);
+            // LWW: local strictly newer → keep local.
+            if (existing && existing.updatedAt > p.updatedAt) continue;
+
+            // Re-hydrate sources. Server ships it as unknown; fall back to []
+            // if it's missing or malformed so the UI never crashes on a
+            // corrupt pull.
+            let sources: Project['sources'] = [];
+            if (Array.isArray(p.sources)) {
+              sources = p.sources as Project['sources'];
+            }
+
+            const merged: Project = {
+              id: p.id,
+              name: p.name,
+              description: p.description ?? undefined,
+              instructions: p.instructions ?? undefined,
+              sources,
+              createdAt: p.createdAt,
+              updatedAt: p.updatedAt,
+            };
+            byId.set(p.id, merged);
+          }
+
+          // Preserve original ordering; append new ones at end (the UI sorts
+          // by updatedAt anyway).
+          const next: Project[] = [];
+          for (const p of s.projects) {
+            if (tombstonedLocally.has(p.id)) continue;
+            const v = byId.get(p.id);
+            if (v) {
+              next.push(v);
+              byId.delete(p.id);
+            }
+          }
+          for (const v of byId.values()) next.push(v);
+
+          // Any conv that pointed at a now-tombstoned project needs a dirty
+          // mark so the projectId=NULL propagates. On this device the link
+          // just shows as dangling; we clear it eagerly so the next push
+          // settles it.
+          const tombstoneIds = tombstonedLocally;
+          const affectedConvIds: string[] = [];
+          const nowMs = Date.now();
+          const convsNext = s.conversations.map((c) => {
+            if (c.projectId && tombstoneIds.has(c.projectId)) {
+              affectedConvIds.push(c.id);
+              return { ...c, projectId: undefined, updatedAt: nowMs };
+            }
+            return c;
+          });
+
+          const pulledIds = new Set(pulled.map((p) => p.id));
+          return {
+            projects: next,
+            conversations:
+              affectedConvIds.length > 0 ? convsNext : s.conversations,
+            activeProjectId:
+              s.activeProjectId && tombstonedLocally.has(s.activeProjectId)
+                ? null
+                : s.activeProjectId,
+            dirtyProjectIds: s.dirtyProjectIds.filter((id) => !pulledIds.has(id)),
+            pendingProjectDeletions: s.pendingProjectDeletions.filter(
+              (id) => !tombstonedLocally.has(id),
+            ),
+            dirtyConversationIds:
+              affectedConvIds.length > 0
+                ? affectedConvIds.reduce(includeDirty, s.dirtyConversationIds)
+                : s.dirtyConversationIds,
+          };
+        }),
+
       dismissConflict: (conversationId) =>
         set((s) => ({
           conflictRecords: s.conflictRecords.filter(
@@ -1141,6 +1290,8 @@ export const useAppStore = create<AppState>()(
         lastSyncAt: s.lastSyncAt,
         dirtyConversationIds: s.dirtyConversationIds,
         pendingDeletions: s.pendingDeletions,
+        dirtyProjectIds: s.dirtyProjectIds,
+        pendingProjectDeletions: s.pendingProjectDeletions,
       }),
       onRehydrateStorage: () => (state) => {
         if (!state) return;

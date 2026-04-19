@@ -43,9 +43,10 @@ import {
   syncPush,
   type SyncConversation,
   type SyncMessage,
+  type SyncProject,
 } from '@/lib/flaudeApi';
 import { useAppStore } from '@/store/useAppStore';
-import type { Conversation, Message } from '@/types';
+import type { Conversation, Message, Project } from '@/types';
 
 // -----------------------------------------------------------------------------
 // Debounce. 800ms is the compromise between "don't re-push on every streamed
@@ -148,6 +149,22 @@ function toWireMessage(m: Message): SyncMessage {
   };
 }
 
+function toWireProject(p: Project): SyncProject {
+  return {
+    id: p.id,
+    name: p.name,
+    description: p.description ?? null,
+    instructions: p.instructions ?? null,
+    // Pass sources through as an opaque array — the server doesn't validate
+    // the element shape and the client is the authoritative schema.
+    sources: p.sources ?? [],
+    createdAt: p.createdAt,
+    updatedAt: p.updatedAt,
+    // Live push; deletions go via the projectDeletions[] array.
+    deletedAt: null,
+  };
+}
+
 function toWireConversation(c: Conversation): SyncConversation {
   return {
     id: c.id,
@@ -191,6 +208,12 @@ export async function pullNow(): Promise<void> {
       const res = await syncPull(since);
       const s = useAppStore.getState();
       s.applyPulledConversations(res.conversations);
+      // projects was introduced in Phase 3.1 — an older server will omit the
+      // field. Treat missing as empty so we don't crash talking to a stale
+      // Worker deployment.
+      if (res.projects && res.projects.length > 0) {
+        s.applyPulledProjects(res.projects);
+      }
       s.setLastSyncAt(res.server_time);
       s.setSyncState('idle');
       pullRetryAttempt = 0; // clean round-trip → fresh budget next time
@@ -235,7 +258,16 @@ export async function pushNow(): Promise<void> {
 
   const dirtyIds = [...store.dirtyConversationIds];
   const deletionIds = [...store.pendingDeletions];
-  if (dirtyIds.length === 0 && deletionIds.length === 0) return;
+  const dirtyProjectIds = [...store.dirtyProjectIds];
+  const projectDeletionIds = [...store.pendingProjectDeletions];
+  if (
+    dirtyIds.length === 0 &&
+    deletionIds.length === 0 &&
+    dirtyProjectIds.length === 0 &&
+    projectDeletionIds.length === 0
+  ) {
+    return;
+  }
 
   // Preempt pending retry — see the matching comment in pullNow.
   clearPushRetry();
@@ -247,9 +279,19 @@ export async function pushNow(): Promise<void> {
     .filter((c) => dirtySet.has(c.id))
     .map(toWireConversation);
 
+  const dirtyProjectSet = new Set(dirtyProjectIds);
+  const projectUpserts = store.projects
+    .filter((p) => dirtyProjectSet.has(p.id))
+    .map(toWireProject);
+
   pushInFlight = (async () => {
     try {
-      await syncPush({ upserts, deletions: deletionIds });
+      await syncPush({
+        upserts,
+        deletions: deletionIds,
+        projectUpserts,
+        projectDeletions: projectDeletionIds,
+      });
 
       // Only clear what we actually sent — a new edit might have landed
       // during the in-flight push, which should stay queued for the next
@@ -257,6 +299,8 @@ export async function pushNow(): Promise<void> {
       const s = useAppStore.getState();
       s.clearDirty(dirtyIds);
       s.clearPendingDeletions(deletionIds);
+      s.clearProjectDirty(dirtyProjectIds);
+      s.clearPendingProjectDeletions(projectDeletionIds);
       s.setSyncState('idle');
       pushRetryAttempt = 0;
 
@@ -268,10 +312,18 @@ export async function pushNow(): Promise<void> {
       // advancing lastSyncAt past the latest pushed updatedAt is safe: any
       // concurrent edit from another device will have a later updatedAt
       // and still come down on the next pull.
-      const maxUpdatedAt = upserts.reduce(
+      //
+      // Include projects in the max so a projects-only push also advances
+      // the cursor.
+      const convMax = upserts.reduce(
         (m, c) => (c.updatedAt > m ? c.updatedAt : m),
-        s.lastSyncAt ?? 0,
+        0,
       );
+      const projMax = projectUpserts.reduce(
+        (m, p) => (p.updatedAt > m ? p.updatedAt : m),
+        0,
+      );
+      const maxUpdatedAt = Math.max(convMax, projMax, s.lastSyncAt ?? 0);
       if (maxUpdatedAt > (s.lastSyncAt ?? 0)) {
         s.setLastSyncAt(maxUpdatedAt);
       }
@@ -334,7 +386,9 @@ export async function startSync(): Promise<void> {
     try {
       const before = useAppStore.getState();
       const isFirstRun = before.lastSyncAt === null;
-      const hadLocalData = before.conversations.some((c) => c.messages.length > 0);
+      const hadLocalData =
+        before.conversations.some((c) => c.messages.length > 0) ||
+        before.projects.length > 0;
 
       await pullNow();
 
@@ -365,10 +419,19 @@ export async function startSync(): Promise<void> {
             useAppStore.getState().markConversationDirty(c.id);
           }
         }
+        // Same logic for projects — mark everything we still have locally.
+        // Unlike convs we don't filter by "has content"; an empty project
+        // shell is still meaningful (the user will pour instructions into
+        // it over multiple sessions).
+        for (const p of after.projects) {
+          useAppStore.getState().markProjectDirty(p.id);
+        }
         await pushNow();
       } else if (
         after.dirtyConversationIds.length > 0 ||
-        after.pendingDeletions.length > 0
+        after.pendingDeletions.length > 0 ||
+        after.dirtyProjectIds.length > 0 ||
+        after.pendingProjectDeletions.length > 0
       ) {
         await pushNow();
       }
@@ -391,19 +454,35 @@ export async function startSync(): Promise<void> {
 // -----------------------------------------------------------------------------
 let previousDirty: string[] | null = null;
 let previousDeletions: string[] | null = null;
+let previousProjectDirty: string[] | null = null;
+let previousProjectDeletions: string[] | null = null;
 useAppStore.subscribe((state) => {
   const dirtyChanged = state.dirtyConversationIds !== previousDirty;
   const deletionsChanged = state.pendingDeletions !== previousDeletions;
+  const projectDirtyChanged = state.dirtyProjectIds !== previousProjectDirty;
+  const projectDeletionsChanged =
+    state.pendingProjectDeletions !== previousProjectDeletions;
   previousDirty = state.dirtyConversationIds;
   previousDeletions = state.pendingDeletions;
-  if (!dirtyChanged && !deletionsChanged) return;
+  previousProjectDirty = state.dirtyProjectIds;
+  previousProjectDeletions = state.pendingProjectDeletions;
+  if (
+    !dirtyChanged &&
+    !deletionsChanged &&
+    !projectDirtyChanged &&
+    !projectDeletionsChanged
+  ) {
+    return;
+  }
   // Only schedule when auth is present — otherwise we'd burn a timer on every
   // edit made while logged out (can't happen in the current auth gate, but
   // defensive).
   if (!state.auth) return;
   if (
     state.dirtyConversationIds.length === 0 &&
-    state.pendingDeletions.length === 0
+    state.pendingDeletions.length === 0 &&
+    state.dirtyProjectIds.length === 0 &&
+    state.pendingProjectDeletions.length === 0
   ) {
     return;
   }

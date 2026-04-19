@@ -81,6 +81,23 @@ interface SyncConversation {
   messages: SyncMessage[];
 }
 
+// Projects = collections of conversations with shared instructions + sources.
+// Sources is a heterogeneous array (file/folder/url/text entries) so we ship
+// it as an opaque JSON value and let the client own the shape — same pattern
+// as SyncMessage.metadata.
+interface SyncProject {
+  id: string;
+  name: string;
+  description?: string | null;
+  instructions?: string | null;
+  /** ProjectSource[] — we don't re-validate here; the client's Zod/TS
+   *  contract is authoritative. Passed through as an opaque JSON value. */
+  sources?: unknown;
+  createdAt: number; // ms
+  updatedAt: number; // ms
+  deletedAt?: number | null; // ms, NULL = live
+}
+
 // -----------------------------------------------------------------------------
 // Payload caps. The numbers are deliberately generous for the friends-group
 // scale and conservative enough that a buggy client can't wedge the Worker
@@ -91,6 +108,8 @@ const MAX_PUSH_BYTES = 5 * 1024 * 1024;        // 5 MB total request body
 const MAX_CONVS_PER_PUSH = 200;                // one push carries ≤200 convs
 const MAX_MESSAGES_PER_CONV = 2_000;           // per-conv message count
 const MAX_MESSAGE_BYTES = 256 * 1024;          // per-message content+reasoning+meta
+const MAX_PROJECTS_PER_PUSH = 200;             // per ROADMAP: friends-group scale
+const MAX_PROJECT_BYTES = 512 * 1024;          // instructions + sources_json combined
 
 // -----------------------------------------------------------------------------
 // GET /sync/pull?since=<ms>
@@ -215,7 +234,52 @@ sync.get('/sync/pull', async (c) => {
     messages: messagesByConv.get(r.id) ?? [],
   }));
 
-  return c.json({ conversations, server_time: serverTime });
+  // Projects piggyback on the same cursor. Same LWW + tombstone semantics as
+  // conversations — we ship deleted rows too so the client can drop any local
+  // copy. sources_json is parsed back out; a corrupt blob gets dropped rather
+  // than failing the whole pull (mirrors the metadata_json behaviour above).
+  const { results: projectRows } = await c.env.DB
+    .prepare(
+      `SELECT id, name, description, instructions, sources_json,
+              created_at, updated_at, deleted_at
+       FROM projects
+       WHERE user_id = ? AND updated_at > ?
+       ORDER BY updated_at ASC`,
+    )
+    .bind(userId, since)
+    .all<{
+      id: string;
+      name: string;
+      description: string | null;
+      instructions: string | null;
+      sources_json: string | null;
+      created_at: number;
+      updated_at: number;
+      deleted_at: number | null;
+    }>();
+
+  const projects: SyncProject[] = projectRows.map((r) => {
+    let sources: unknown = undefined;
+    if (r.sources_json) {
+      try {
+        sources = JSON.parse(r.sources_json);
+      } catch {
+        sources = undefined;
+      }
+    }
+    return {
+      id: r.id,
+      name: r.name,
+      description: r.description,
+      instructions: r.instructions,
+      sources,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+      deletedAt: r.deleted_at,
+    };
+  });
+
+  return c.json({ conversations, projects, server_time: serverTime });
 });
 
 // -----------------------------------------------------------------------------
@@ -224,6 +288,8 @@ sync.get('/sync/pull', async (c) => {
 interface PushBody {
   upserts?: unknown;
   deletions?: unknown;
+  projectUpserts?: unknown;
+  projectDeletions?: unknown;
 }
 
 sync.post('/sync/push', async (c) => {
@@ -240,9 +306,18 @@ sync.post('/sync/push', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as PushBody;
   const upserts = Array.isArray(body.upserts) ? (body.upserts as SyncConversation[]) : [];
   const deletions = Array.isArray(body.deletions) ? (body.deletions as string[]) : [];
+  const projectUpserts = Array.isArray(body.projectUpserts)
+    ? (body.projectUpserts as SyncProject[])
+    : [];
+  const projectDeletions = Array.isArray(body.projectDeletions)
+    ? (body.projectDeletions as string[])
+    : [];
 
   if (upserts.length > MAX_CONVS_PER_PUSH) {
     return c.json({ error: `too many conversations in one push (max ${MAX_CONVS_PER_PUSH})` }, 413);
+  }
+  if (projectUpserts.length > MAX_PROJECTS_PER_PUSH) {
+    return c.json({ error: `too many projects in one push (max ${MAX_PROJECTS_PER_PUSH})` }, 413);
   }
 
   // Validate upserts before touching the DB so we don't half-apply a batch.
@@ -289,6 +364,41 @@ sync.post('/sync/push', async (c) => {
         );
       }
     }
+  }
+
+  // Same drill for projects. `sources` is opaque JSON to us; we only measure
+  // and re-serialize. instructions is the other main size driver (users paste
+  // long briefs in there).
+  const projectSourcesJson = new Map<string, string | null>();
+  for (const p of projectUpserts) {
+    if (typeof p?.id !== 'string' || !p.id) {
+      return c.json({ error: 'project.id required' }, 400);
+    }
+    if (typeof p.name !== 'string') {
+      return c.json({ error: `project ${p.id}: name must be string` }, 400);
+    }
+    if (!Number.isFinite(p.createdAt) || !Number.isFinite(p.updatedAt)) {
+      return c.json({ error: `project ${p.id}: createdAt/updatedAt must be numbers` }, 400);
+    }
+    let sourcesJson: string | null = null;
+    if (p.sources !== undefined && p.sources !== null) {
+      try {
+        sourcesJson = JSON.stringify(p.sources);
+      } catch {
+        return c.json({ error: `project ${p.id}: sources not JSON-serializable` }, 400);
+      }
+    }
+    const approxBytes =
+      (p.instructions?.length ?? 0) +
+      (p.description?.length ?? 0) +
+      (sourcesJson?.length ?? 0);
+    if (approxBytes > MAX_PROJECT_BYTES) {
+      return c.json(
+        { error: `project ${p.id}: too large (${approxBytes}B, max ${MAX_PROJECT_BYTES}B)` },
+        413,
+      );
+    }
+    projectSourcesJson.set(p.id, sourcesJson);
   }
 
   const now = Date.now();
@@ -405,6 +515,57 @@ sync.post('/sync/push', async (c) => {
       c.env.DB
         .prepare(
           `UPDATE conversations
+           SET deleted_at = ?, updated_at = ?
+           WHERE id = ? AND user_id = ? AND deleted_at IS NULL`,
+        )
+        .bind(now, now, id, userId),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Projects: same LWW UPSERT + tombstone UPDATE pattern. No messages table
+  // equivalent, so each project is a single statement — much simpler than
+  // conversations. sources is re-serialized to sources_json (we precomputed
+  // it during validation; use that cached string to avoid double-JSON-ing).
+  // ---------------------------------------------------------------------------
+  for (const p of projectUpserts) {
+    stmts.push(
+      c.env.DB
+        .prepare(
+          `INSERT INTO projects (
+             id, user_id, name, description, instructions, sources_json,
+             created_at, updated_at, deleted_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             name          = excluded.name,
+             description   = excluded.description,
+             instructions  = excluded.instructions,
+             sources_json  = excluded.sources_json,
+             updated_at    = excluded.updated_at,
+             deleted_at    = excluded.deleted_at
+           WHERE projects.user_id = excluded.user_id
+             AND excluded.updated_at > projects.updated_at`,
+        )
+        .bind(
+          p.id,
+          userId,
+          p.name,
+          p.description ?? null,
+          p.instructions ?? null,
+          projectSourcesJson.get(p.id) ?? null,
+          p.createdAt,
+          p.updatedAt,
+          p.deletedAt ?? null,
+        ),
+    );
+  }
+
+  for (const id of projectDeletions) {
+    if (typeof id !== 'string' || !id) continue;
+    stmts.push(
+      c.env.DB
+        .prepare(
+          `UPDATE projects
            SET deleted_at = ?, updated_at = ?
            WHERE id = ? AND user_id = ? AND deleted_at IS NULL`,
         )

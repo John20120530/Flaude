@@ -334,8 +334,29 @@ export interface SyncConversation {
   messages: SyncMessage[];
 }
 
+/**
+ * Wire shape of a project. Mirrors server/src/sync.ts.
+ *
+ * `sources` is the ProjectSource[] array from the client's Project type,
+ * passed through as opaque JSON — the server doesn't validate the element
+ * shape (see sources_json in schema.sql).
+ */
+export interface SyncProject {
+  id: string;
+  name: string;
+  description?: string | null;
+  instructions?: string | null;
+  sources?: unknown;
+  createdAt: number;
+  updatedAt: number;
+  /** Unix ms of soft-delete. NULL/undefined = live project. */
+  deletedAt?: number | null;
+}
+
 export interface SyncPullResponse {
   conversations: SyncConversation[];
+  /** Added in Phase 3.1. Older servers may omit this — treat as empty. */
+  projects?: SyncProject[];
   /** Pass this as `since` on the next pull. Ms. */
   server_time: number;
 }
@@ -353,6 +374,9 @@ export function syncPull(since: number): Promise<SyncPullResponse> {
 export function syncPush(args: {
   upserts: SyncConversation[];
   deletions: string[];
+  /** New in Phase 3.1. Server ignores these if it predates the migration. */
+  projectUpserts?: SyncProject[];
+  projectDeletions?: string[];
 }): Promise<SyncPushResponse> {
   return authPostJson<SyncPushResponse>('/sync/push', args);
 }

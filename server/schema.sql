@@ -129,3 +129,28 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_conversation
   ON messages(conversation_id, created_at);
+
+-- -----------------------------------------------------------------------------
+-- projects (Phase 3.1)
+--   Collections of conversations with shared instructions + knowledge sources.
+--   Same LWW pattern as conversations: client-gen TEXT id, ms timestamps,
+--   deleted_at tombstone, soft-delete purged by the 90d cron.
+--
+--   sources_json holds the JSON-encoded ProjectSource[] (D1 has no JSON type;
+--   the client owns the shape). conversations.project_id is a loose ref to
+--   projects.id — not enforced as a FK so push ordering can't wedge.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS projects (
+  id            TEXT PRIMARY KEY,
+  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name          TEXT NOT NULL DEFAULT '',
+  description   TEXT,
+  instructions  TEXT,
+  sources_json  TEXT,
+  created_at    INTEGER NOT NULL,               -- ms, client-supplied
+  updated_at    INTEGER NOT NULL,               -- ms, client-supplied
+  deleted_at    INTEGER                         -- ms, NULL = live
+);
+
+CREATE INDEX IF NOT EXISTS idx_projects_user_updated
+  ON projects(user_id, updated_at DESC);
