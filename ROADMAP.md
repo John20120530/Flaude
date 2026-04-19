@@ -14,6 +14,8 @@ Phase 1（本地骨架）、Phase 2（鉴权 + 配额 + DeepSeek 代理）、Pha
 - **startSync 双触发修复**：React.StrictMode 下的 useEffect 双调用用 in-flight promise 合并。commit `ba1b9dc`（含在 initial commit 里）。
 - **Projects / Artifacts 同步（原 #1 阻塞级）**：D1 加表 + `/sync/pull|push` 扩展 payload + 客户端 dirty 追踪全部落地；LWW + tombstone 与 conversations 共用一套。commits `14d9463`（projects）、`83ee165`（artifacts）、`b50267b`（LWW 冲突 toast）。
 - **核心路径测试覆盖（原 #5 体验级）**：分三个 commit 补齐。`bb1c737`—store actions 49 个 vitest；`93e8751`—`lib/sync.ts` 22 个（pull/push/debounce/retry）；`test(server)`—服务端 25 个集成测试（node-env + better-sqlite3 D1 shim，跳过 workerd 因为仓库路径含非 ASCII 字符）。测试过程中顺手修掉一个生产 bug：`admin.use('*', requireAdmin)` 因为 sub-app 挂在 `/`，`*` 在 Hono 下匹配所有路径，导致非 admin 用户被锁在 /sync/pull 外——现在 scope 到 `/admin/*`。
+- **Code agent 打磨 2-3 / 2-4（原 #2 体验级，部分）**：`useStreamedChat` 工具调用上限 8 → 30；`ToolCallCard` 长输出（>20 行 / >2000 字符）默认折叠，展开按钮显示总量。commit `bee00f8`。
+- **Code agent 打磨 2-1（原 #2 体验级，最重要一项）**：`fs_write_file` 调用前弹 diff preview 让用户审查。新增 `lib/diff.ts`（LCS 行级 diff，5000 行硬上限）+ `lib/writeApproval.ts`（handler↔modal 桥，module-level resolver Map + zustand 传可序列化数据）+ `WriteApprovalModal`（mono diff view + Esc 拒绝 / Ctrl/⌘+Enter 应用）。`allowFileWrites` 从"全开全关"变成"gate + per-call 审查"——用户看得到 diff 再决定。新增 20 个 vitest（15 diff + 5 approval 桥）。
 
 **重要修正**：老版本 ROADMAP 里把"Code 模式真工具"列为阻塞级待办是**错的**——`src/lib/desktopTools.ts` 已经通过 Tauri 原生 API 接了 `fs_list_dir` / `fs_read_file` / `fs_stat` / `fs_write_file` / `shell_exec` 五件套，带权限门，Code agent 能真读写文件、跑 shell 命令。那项打磨性的工作移到下面 **#2**。
 
@@ -30,11 +32,12 @@ _当前无阻塞级待办。原 #1（Projects / Artifacts 同步）已于本 ses
 ### 2. Code agent 打磨项
 
 - **现状**：工具链跑通了，但离 Claude Code / Cursor agent 的打磨度还有距离。能跑不等于好用。
-- **下一步候选**（按性价比排）：
-  1. **写前确认 UI（diff preview）**：`fs_write_file` 前弹窗给用户看一个 diff，点"应用"才真写。现在是 `allowFileWrites` 开关一打开所有写入直接通过，没有 per-call 审查。**最重要的一项**——涉及实际项目文件安全。
+- **已完成**（本 session）：**2-1 写前确认 UI**、**2-3 迭代循环上限**、**2-4 工具结果折叠**——见"最近完成"。
+- **剩余候选**：
+  1. ~~**写前确认 UI（diff preview）**~~ ✅ 完成
   2. **持久 PTY**：当前 `shell_exec` 是一次性起子进程收集 stdout，像 `npm run dev` 这种持续输出的命令没法好好用。对应 Claude Code 的 `Bash(run_in_background=true)`。
-  3. **迭代循环上限**：核一下 `useStreamedChat` 现在允许模型最多连续调几次工具。Claude Code 默认几十次；限得太紧 agent 行为会半途而废。
-  4. **工具结果可折叠展示**：长 `fs_read_file` / `shell_exec` 输出在对话里默认折叠，点开看全文，不然会议滚条被工具输出淹没。
+  3. ~~**迭代循环上限**~~ ✅ 完成（8 → 30）
+  4. ~~**工具结果可折叠展示**~~ ✅ 完成
   5. **Agent 自维护 TODO**：加一个 `todo_write` 工具让 agent 自己做任务拆解（Claude Code 的做法）。长任务可见度大幅提升。
 
 ### 3. 网络失败没有重试 / 退避

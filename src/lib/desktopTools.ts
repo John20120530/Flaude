@@ -15,6 +15,7 @@ import {
   shellExec,
 } from './tauri';
 import { useAppStore } from '@/store/useAppStore';
+import { requestWriteApproval } from './writeApproval';
 
 /**
  * Helper: pull current workspace + permissions from the store. We read via
@@ -138,9 +139,9 @@ export function registerDesktopTools(): void {
     name: 'fs_write_file',
     description:
       'Create or overwrite a file inside the current workspace. ' +
-      'DESTRUCTIVE: silently replaces the file. Ask the user before writing ' +
-      'unless they clearly asked for the change. Requires user to have ' +
-      'enabled "allow file writes" in settings.',
+      'The user is shown a diff and must click Apply before the write happens — ' +
+      'so you can propose changes freely, but the user always has final say. ' +
+      'Requires user to have enabled "allow file writes" in settings.',
     parameters: {
       type: 'object',
       properties: {
@@ -163,13 +164,43 @@ export function registerDesktopTools(): void {
         );
       }
       const ws = requireWorkspace();
-      await fsWriteFile(
-        ws,
-        String(path),
-        String(content),
-        Boolean(create_dirs)
-      );
-      return `已写入 ${path} (${(content as string).length} 字符)`;
+      const filePath = String(path);
+      const newContent = String(content);
+      const createDirs = Boolean(create_dirs);
+
+      // Snapshot the current file so the approval modal can show a diff.
+      // A read error almost always means "file doesn't exist yet" (ENOENT) —
+      // treat as a new-file create. We don't try to distinguish "exists but
+      // unreadable" here because the subsequent fsWriteFile will surface
+      // any real permissions issue with a clearer message.
+      let oldContent = '';
+      let isNewFile = false;
+      try {
+        oldContent = await fsReadFile(ws, filePath);
+      } catch {
+        isNewFile = true;
+      }
+
+      // Short-circuit no-op writes — the model sometimes re-issues a write
+      // with identical content after re-reading a file it already edited.
+      // Surfacing a "diff with 0 changes" modal would be noise; just return.
+      if (!isNewFile && oldContent === newContent) {
+        return `${filePath} 已是目标内容，跳过写入。`;
+      }
+
+      const approved = await requestWriteApproval({
+        path: filePath,
+        oldContent,
+        newContent,
+        isNewFile,
+        createDirs,
+      });
+      if (!approved) {
+        throw new Error(`用户拒绝写入 ${filePath}`);
+      }
+
+      await fsWriteFile(ws, filePath, newContent, createDirs);
+      return `已写入 ${filePath} (${newContent.length} 字符)`;
     },
   });
 
