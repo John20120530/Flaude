@@ -8,9 +8,26 @@
 # Generate: node -e "console.log(require('crypto').randomBytes(48).toString('base64'))"
 JWT_SECRET="replace-me-with-48-random-bytes-base64-encoded"
 
-# DeepSeek API key. Get at https://platform.deepseek.com/api_keys
-# Needed if clients send model=deepseek-chat or deepseek-reasoner.
+# Upstream LLM provider keys.
+# Only the providers you actually want to serve need to be filled in.
+# A model whose provider lacks a key returns 500 "server not configured",
+# not a silent failure.
+
+# DeepSeek. Get at https://platform.deepseek.com/api_keys
+# Models: deepseek-chat, deepseek-reasoner.
 DEEPSEEK_API_KEY="sk-..."
+
+# Qwen (Alibaba DashScope, OpenAI-compatible mode). Get at https://dashscope.console.aliyun.com
+# Models: qwen-turbo, qwen-plus, qwen-max.
+QWEN_API_KEY="sk-..."
+
+# Zhipu GLM (BigModel). Get at https://bigmodel.cn
+# Models: glm-4-flash, glm-4-air, glm-4-plus.
+ZHIPU_API_KEY="..."
+
+# Moonshot Kimi. Get at https://platform.moonshot.cn
+# Models: moonshot-v1-8k, moonshot-v1-32k, moonshot-v1-128k.
+MOONSHOT_API_KEY="sk-..."
 
 # 博查 (BochaAI) Web Search API key. Get at https://open.bochaai.com
 # Shared across all users — omit this line to disable web_search entirely.

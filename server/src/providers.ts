@@ -15,7 +15,7 @@
  */
 import type { Env } from './env';
 
-export type ProviderId = 'deepseek';
+export type ProviderId = 'deepseek' | 'qwen' | 'zhipu' | 'moonshot';
 
 export interface ModelPricing {
   /** Input tokens: cost in micro-USD per 1_000 tokens. */
@@ -55,7 +55,75 @@ const DEEPSEEK: ProviderConfig = {
   },
 };
 
-const PROVIDERS: ProviderConfig[] = [DEEPSEEK];
+// Qwen via DashScope's OpenAI-compatible endpoint. The `compatible-mode`
+// path exists specifically so chat.completions clients work unchanged —
+// don't fall back to the native /api/v1/services/... endpoint, it has a
+// different request schema.
+//
+// Pricing as of 2026-04 (DashScope public rates, converted from CNY @ ~¥7/$):
+//   qwen-turbo : input  ¥0.3 / 1M  ≈ $0.043 → 43 micros/1k
+//                output ¥0.6 / 1M  ≈ $0.086 → 86 micros/1k
+//   qwen-plus  : input  ¥0.8 / 1M  ≈ $0.114 → 114 micros/1k
+//                output ¥2.0 / 1M  ≈ $0.286 → 286 micros/1k
+//   qwen-max   : input  ¥2.4 / 1M  ≈ $0.343 → 343 micros/1k
+//                output ¥9.6 / 1M  ≈ $1.371 → 1371 micros/1k
+//
+// Re-check before production; Alibaba adjusts prices quarterly.
+const QWEN: ProviderConfig = {
+  id: 'qwen',
+  baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+  keyEnvName: 'QWEN_API_KEY',
+  models: {
+    'qwen-turbo': { inputMicroUsdPer1k:  43, outputMicroUsdPer1k:   86 },
+    'qwen-plus':  { inputMicroUsdPer1k: 114, outputMicroUsdPer1k:  286 },
+    'qwen-max':   { inputMicroUsdPer1k: 343, outputMicroUsdPer1k: 1371 },
+  },
+};
+
+// Zhipu GLM via BigModel. Their OpenAI-compatible endpoint under /paas/v4 is
+// the one to target; the older /api/paas/v3 one uses their own schema.
+//
+// Pricing as of 2026-04 (rough, converted from CNY @ ~¥7/$):
+//   glm-4-air  : input  ¥0.5 / 1M  ≈ $0.071 → 71 micros/1k
+//                output ¥0.5 / 1M  ≈ $0.071 → 71 micros/1k
+//   glm-4-plus : input  ¥5   / 1M  ≈ $0.714 → 714 micros/1k
+//                output ¥5   / 1M  ≈ $0.714 → 714 micros/1k
+//   glm-4-flash: free tier — still bill at a nominal rate so quota math works.
+//
+// Re-check upstream before production.
+const ZHIPU: ProviderConfig = {
+  id: 'zhipu',
+  baseUrl: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+  keyEnvName: 'ZHIPU_API_KEY',
+  models: {
+    'glm-4-flash': { inputMicroUsdPer1k:   0, outputMicroUsdPer1k:   0 },
+    'glm-4-air':   { inputMicroUsdPer1k:  71, outputMicroUsdPer1k:  71 },
+    'glm-4-plus':  { inputMicroUsdPer1k: 714, outputMicroUsdPer1k: 714 },
+  },
+};
+
+// Moonshot Kimi. Standard OpenAI-compatible at /v1/chat/completions. The
+// model name encodes context window (8k / 32k / 128k) — clients pick the
+// right one, pricing scales accordingly.
+//
+// Pricing as of 2026-04 (rough, converted from CNY @ ~¥7/$):
+//   moonshot-v1-8k   : ¥12 / 1M  ≈ $1.71  → 1714 micros/1k (both dirs)
+//   moonshot-v1-32k  : ¥24 / 1M  ≈ $3.43  → 3429 micros/1k
+//   moonshot-v1-128k : ¥60 / 1M  ≈ $8.57  → 8571 micros/1k
+//
+// Re-check upstream before production.
+const MOONSHOT: ProviderConfig = {
+  id: 'moonshot',
+  baseUrl: 'https://api.moonshot.cn/v1/chat/completions',
+  keyEnvName: 'MOONSHOT_API_KEY',
+  models: {
+    'moonshot-v1-8k':   { inputMicroUsdPer1k: 1714, outputMicroUsdPer1k: 1714 },
+    'moonshot-v1-32k':  { inputMicroUsdPer1k: 3429, outputMicroUsdPer1k: 3429 },
+    'moonshot-v1-128k': { inputMicroUsdPer1k: 8571, outputMicroUsdPer1k: 8571 },
+  },
+};
+
+const PROVIDERS: ProviderConfig[] = [DEEPSEEK, QWEN, ZHIPU, MOONSHOT];
 
 // Flat lookup: model string → (provider, pricing). Built once at module load.
 const MODEL_INDEX: Record<string, { provider: ProviderConfig; pricing: ModelPricing }> = {};
