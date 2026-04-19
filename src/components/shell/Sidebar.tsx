@@ -15,6 +15,8 @@ import {
   MoreHorizontal,
   Download,
   X,
+  Loader2,
+  CloudOff,
 } from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
 import { cn, formatTime } from '@/lib/utils';
@@ -46,6 +48,11 @@ export default function Sidebar() {
   // auth-presence because non-admin users shouldn't even see the link — the
   // route guard in App.tsx is the real gate, this just hides a dead entry.
   const isAdmin = useAppStore((s) => s.auth?.user.role === 'admin');
+  // Sync state drives the small indicator next to "v0.1" in the header. We
+  // subscribe to both fields separately so React bails out on identity-equal
+  // updates (syncError stays null across every pull/push when things work).
+  const syncState = useAppStore((s) => s.syncState);
+  const syncError = useAppStore((s) => s.syncError);
 
   const [query, setQuery] = useState('');
   // Debounce the query so typing doesn't rescan messages on every keystroke.
@@ -93,9 +100,26 @@ export default function Sidebar() {
           F
         </div>
         <span className="font-semibold tracking-tight">Flaude</span>
-        <span className="ml-auto text-xs text-claude-muted dark:text-night-muted">
-          v0.1
-        </span>
+        <div className="ml-auto flex items-center gap-2 text-xs text-claude-muted dark:text-night-muted">
+          {/* Sync indicator. Idle → nothing (keep the header quiet). Pulling/
+              pushing → animated spinner. Error → offline-cloud icon with the
+              underlying error message on hover. */}
+          {(syncState === 'pulling' || syncState === 'pushing') && (
+            <Loader2
+              className="w-3.5 h-3.5 animate-spin"
+              aria-label={syncState === 'pulling' ? '正在同步（拉取）' : '正在同步（上传）'}
+            />
+          )}
+          {syncState === 'error' && (
+            <span title={`同步失败：${syncError ?? '未知错误'}`}>
+              <CloudOff
+                className="w-3.5 h-3.5 text-red-500"
+                aria-label={`同步失败：${syncError ?? '未知错误'}`}
+              />
+            </span>
+          )}
+          <span>v0.1</span>
+        </div>
       </div>
 
       <nav className="px-2 pt-3 space-y-0.5">
