@@ -98,6 +98,22 @@ interface SyncProject {
   deletedAt?: number | null; // ms, NULL = live
 }
 
+// Artifacts = Claude-style viewable deliverables. One row per artifact id;
+// `messageId` is a loose ref (the artifact survives the message being
+// deleted, and auto-promoted artifacts carry an ad-hoc id that isn't in
+// the messages table).
+interface SyncArtifact {
+  id: string;
+  messageId?: string | null;
+  type: string;             // html | react | svg | mermaid | markdown | code
+  title: string;
+  language?: string | null; // only set for type=code
+  content: string;
+  createdAt: number; // ms
+  updatedAt: number; // ms
+  deletedAt?: number | null; // ms, NULL = live
+}
+
 // -----------------------------------------------------------------------------
 // Payload caps. The numbers are deliberately generous for the friends-group
 // scale and conservative enough that a buggy client can't wedge the Worker
@@ -110,6 +126,8 @@ const MAX_MESSAGES_PER_CONV = 2_000;           // per-conv message count
 const MAX_MESSAGE_BYTES = 256 * 1024;          // per-message content+reasoning+meta
 const MAX_PROJECTS_PER_PUSH = 200;             // per ROADMAP: friends-group scale
 const MAX_PROJECT_BYTES = 512 * 1024;          // instructions + sources_json combined
+const MAX_ARTIFACTS_PER_PUSH = 500;            // artifacts stream-fire; higher cap than convs
+const MAX_ARTIFACT_BYTES = 1 * 1024 * 1024;    // 1MB — an HTML page can get chunky
 
 // -----------------------------------------------------------------------------
 // GET /sync/pull?since=<ms>
@@ -279,7 +297,45 @@ sync.get('/sync/pull', async (c) => {
     };
   });
 
-  return c.json({ conversations, projects, server_time: serverTime });
+  // Artifacts piggyback on the same cursor. Same LWW + tombstone semantics;
+  // tombstoned rows are included so the client can drop any local copy.
+  const { results: artifactRows } = await c.env.DB
+    .prepare(
+      `SELECT id, message_id, type, title, language, content,
+              created_at, updated_at, deleted_at
+       FROM artifacts
+       WHERE user_id = ? AND updated_at > ?
+       ORDER BY updated_at ASC`,
+    )
+    .bind(userId, since)
+    .all<{
+      id: string;
+      message_id: string | null;
+      type: string;
+      title: string;
+      language: string | null;
+      content: string;
+      created_at: number;
+      updated_at: number;
+      deleted_at: number | null;
+    }>();
+
+  const artifacts: SyncArtifact[] = artifactRows.map((r) => ({
+    id: r.id,
+    messageId: r.message_id,
+    type: r.type,
+    title: r.title,
+    language: r.language,
+    // Tombstoned rows ship an empty content — we already know the row is
+    // going away on the client side, and shipping the old content just
+    // wastes bytes. Live rows keep their full content.
+    content: r.deleted_at != null ? '' : r.content,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    deletedAt: r.deleted_at,
+  }));
+
+  return c.json({ conversations, projects, artifacts, server_time: serverTime });
 });
 
 // -----------------------------------------------------------------------------
@@ -290,6 +346,8 @@ interface PushBody {
   deletions?: unknown;
   projectUpserts?: unknown;
   projectDeletions?: unknown;
+  artifactUpserts?: unknown;
+  artifactDeletions?: unknown;
 }
 
 sync.post('/sync/push', async (c) => {
@@ -312,12 +370,21 @@ sync.post('/sync/push', async (c) => {
   const projectDeletions = Array.isArray(body.projectDeletions)
     ? (body.projectDeletions as string[])
     : [];
+  const artifactUpserts = Array.isArray(body.artifactUpserts)
+    ? (body.artifactUpserts as SyncArtifact[])
+    : [];
+  const artifactDeletions = Array.isArray(body.artifactDeletions)
+    ? (body.artifactDeletions as string[])
+    : [];
 
   if (upserts.length > MAX_CONVS_PER_PUSH) {
     return c.json({ error: `too many conversations in one push (max ${MAX_CONVS_PER_PUSH})` }, 413);
   }
   if (projectUpserts.length > MAX_PROJECTS_PER_PUSH) {
     return c.json({ error: `too many projects in one push (max ${MAX_PROJECTS_PER_PUSH})` }, 413);
+  }
+  if (artifactUpserts.length > MAX_ARTIFACTS_PER_PUSH) {
+    return c.json({ error: `too many artifacts in one push (max ${MAX_ARTIFACTS_PER_PUSH})` }, 413);
   }
 
   // Validate upserts before touching the DB so we don't half-apply a batch.
@@ -399,6 +466,28 @@ sync.post('/sync/push', async (c) => {
       );
     }
     projectSourcesJson.set(p.id, sourcesJson);
+  }
+
+  // Artifacts: lightweight validation. content is the only heavyweight field.
+  for (const a of artifactUpserts) {
+    if (typeof a?.id !== 'string' || !a.id) {
+      return c.json({ error: 'artifact.id required' }, 400);
+    }
+    if (typeof a.type !== 'string' || typeof a.title !== 'string') {
+      return c.json({ error: `artifact ${a.id}: type+title required` }, 400);
+    }
+    if (typeof a.content !== 'string') {
+      return c.json({ error: `artifact ${a.id}: content must be string` }, 400);
+    }
+    if (!Number.isFinite(a.createdAt) || !Number.isFinite(a.updatedAt)) {
+      return c.json({ error: `artifact ${a.id}: createdAt/updatedAt must be numbers` }, 400);
+    }
+    if (a.content.length > MAX_ARTIFACT_BYTES) {
+      return c.json(
+        { error: `artifact ${a.id}: too large (${a.content.length}B, max ${MAX_ARTIFACT_BYTES}B)` },
+        413,
+      );
+    }
   }
 
   const now = Date.now();
@@ -566,6 +655,58 @@ sync.post('/sync/push', async (c) => {
       c.env.DB
         .prepare(
           `UPDATE projects
+           SET deleted_at = ?, updated_at = ?
+           WHERE id = ? AND user_id = ? AND deleted_at IS NULL`,
+        )
+        .bind(now, now, id, userId),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Artifacts: LWW UPSERT + tombstone UPDATE. Same pattern as projects, but
+  // with its own table and no JSON blob to re-serialize. Streaming generates
+  // a lot of upserts; the client-side debounce is what keeps this cheap.
+  // ---------------------------------------------------------------------------
+  for (const a of artifactUpserts) {
+    stmts.push(
+      c.env.DB
+        .prepare(
+          `INSERT INTO artifacts (
+             id, user_id, message_id, type, title, language, content,
+             created_at, updated_at, deleted_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             message_id = excluded.message_id,
+             type       = excluded.type,
+             title      = excluded.title,
+             language   = excluded.language,
+             content    = excluded.content,
+             updated_at = excluded.updated_at,
+             deleted_at = excluded.deleted_at
+           WHERE artifacts.user_id = excluded.user_id
+             AND excluded.updated_at > artifacts.updated_at`,
+        )
+        .bind(
+          a.id,
+          userId,
+          a.messageId ?? null,
+          a.type,
+          a.title,
+          a.language ?? null,
+          a.content,
+          a.createdAt,
+          a.updatedAt,
+          a.deletedAt ?? null,
+        ),
+    );
+  }
+
+  for (const id of artifactDeletions) {
+    if (typeof id !== 'string' || !id) continue;
+    stmts.push(
+      c.env.DB
+        .prepare(
+          `UPDATE artifacts
            SET deleted_at = ?, updated_at = ?
            WHERE id = ? AND user_id = ? AND deleted_at IS NULL`,
         )

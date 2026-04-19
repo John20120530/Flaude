@@ -41,11 +41,13 @@ import {
   FlaudeApiError,
   syncPull,
   syncPush,
+  type SyncArtifact,
   type SyncConversation,
   type SyncMessage,
   type SyncProject,
 } from '@/lib/flaudeApi';
 import { useAppStore } from '@/store/useAppStore';
+import type { Artifact } from '@/lib/artifacts';
 import type { Conversation, Message, Project } from '@/types';
 
 // -----------------------------------------------------------------------------
@@ -165,6 +167,25 @@ function toWireProject(p: Project): SyncProject {
   };
 }
 
+function toWireArtifact(a: Artifact): SyncArtifact {
+  return {
+    id: a.id,
+    messageId: a.messageId ?? null,
+    type: a.type,
+    title: a.title,
+    language: a.language ?? null,
+    content: a.content,
+    createdAt: a.createdAt,
+    // Pre-migration rows may lack updatedAt; the store stamps it on every
+    // upsert, but a first-sync seed path might hit an artifact that was
+    // rehydrated without ever being touched. Fall back to createdAt so the
+    // server gets a monotonic-enough value (worst case: the row's LWW guard
+    // never wins until the user next edits it, which is acceptable).
+    updatedAt: a.updatedAt ?? a.createdAt,
+    deletedAt: null,
+  };
+}
+
 function toWireConversation(c: Conversation): SyncConversation {
   return {
     id: c.id,
@@ -214,6 +235,10 @@ export async function pullNow(): Promise<void> {
       if (res.projects && res.projects.length > 0) {
         s.applyPulledProjects(res.projects);
       }
+      // artifacts: introduced in Phase 3.2. Same story.
+      if (res.artifacts && res.artifacts.length > 0) {
+        s.applyPulledArtifacts(res.artifacts);
+      }
       s.setLastSyncAt(res.server_time);
       s.setSyncState('idle');
       pullRetryAttempt = 0; // clean round-trip → fresh budget next time
@@ -260,11 +285,15 @@ export async function pushNow(): Promise<void> {
   const deletionIds = [...store.pendingDeletions];
   const dirtyProjectIds = [...store.dirtyProjectIds];
   const projectDeletionIds = [...store.pendingProjectDeletions];
+  const dirtyArtifactIds = [...store.dirtyArtifactIds];
+  const artifactDeletionIds = [...store.pendingArtifactDeletions];
   if (
     dirtyIds.length === 0 &&
     deletionIds.length === 0 &&
     dirtyProjectIds.length === 0 &&
-    projectDeletionIds.length === 0
+    projectDeletionIds.length === 0 &&
+    dirtyArtifactIds.length === 0 &&
+    artifactDeletionIds.length === 0
   ) {
     return;
   }
@@ -284,6 +313,11 @@ export async function pushNow(): Promise<void> {
     .filter((p) => dirtyProjectSet.has(p.id))
     .map(toWireProject);
 
+  const dirtyArtifactSet = new Set(dirtyArtifactIds);
+  const artifactUpserts = Object.values(store.artifacts)
+    .filter((a) => dirtyArtifactSet.has(a.id))
+    .map(toWireArtifact);
+
   pushInFlight = (async () => {
     try {
       await syncPush({
@@ -291,6 +325,8 @@ export async function pushNow(): Promise<void> {
         deletions: deletionIds,
         projectUpserts,
         projectDeletions: projectDeletionIds,
+        artifactUpserts,
+        artifactDeletions: artifactDeletionIds,
       });
 
       // Only clear what we actually sent — a new edit might have landed
@@ -301,6 +337,8 @@ export async function pushNow(): Promise<void> {
       s.clearPendingDeletions(deletionIds);
       s.clearProjectDirty(dirtyProjectIds);
       s.clearPendingProjectDeletions(projectDeletionIds);
+      s.clearArtifactDirty(dirtyArtifactIds);
+      s.clearPendingArtifactDeletions(artifactDeletionIds);
       s.setSyncState('idle');
       pushRetryAttempt = 0;
 
@@ -323,7 +361,16 @@ export async function pushNow(): Promise<void> {
         (m, p) => (p.updatedAt > m ? p.updatedAt : m),
         0,
       );
-      const maxUpdatedAt = Math.max(convMax, projMax, s.lastSyncAt ?? 0);
+      const artMax = artifactUpserts.reduce(
+        (m, a) => (a.updatedAt > m ? a.updatedAt : m),
+        0,
+      );
+      const maxUpdatedAt = Math.max(
+        convMax,
+        projMax,
+        artMax,
+        s.lastSyncAt ?? 0,
+      );
       if (maxUpdatedAt > (s.lastSyncAt ?? 0)) {
         s.setLastSyncAt(maxUpdatedAt);
       }
@@ -388,7 +435,8 @@ export async function startSync(): Promise<void> {
       const isFirstRun = before.lastSyncAt === null;
       const hadLocalData =
         before.conversations.some((c) => c.messages.length > 0) ||
-        before.projects.length > 0;
+        before.projects.length > 0 ||
+        Object.keys(before.artifacts).length > 0;
 
       await pullNow();
 
@@ -426,12 +474,20 @@ export async function startSync(): Promise<void> {
         for (const p of after.projects) {
           useAppStore.getState().markProjectDirty(p.id);
         }
+        // And artifacts. No "has content" filter either — every artifact
+        // by definition carries content (empty ones wouldn't have been
+        // upserted), and the 800ms debounce already collapses the burst.
+        for (const aid of Object.keys(after.artifacts)) {
+          useAppStore.getState().markArtifactDirty(aid);
+        }
         await pushNow();
       } else if (
         after.dirtyConversationIds.length > 0 ||
         after.pendingDeletions.length > 0 ||
         after.dirtyProjectIds.length > 0 ||
-        after.pendingProjectDeletions.length > 0
+        after.pendingProjectDeletions.length > 0 ||
+        after.dirtyArtifactIds.length > 0 ||
+        after.pendingArtifactDeletions.length > 0
       ) {
         await pushNow();
       }
@@ -456,21 +512,31 @@ let previousDirty: string[] | null = null;
 let previousDeletions: string[] | null = null;
 let previousProjectDirty: string[] | null = null;
 let previousProjectDeletions: string[] | null = null;
+let previousArtifactDirty: string[] | null = null;
+let previousArtifactDeletions: string[] | null = null;
 useAppStore.subscribe((state) => {
   const dirtyChanged = state.dirtyConversationIds !== previousDirty;
   const deletionsChanged = state.pendingDeletions !== previousDeletions;
   const projectDirtyChanged = state.dirtyProjectIds !== previousProjectDirty;
   const projectDeletionsChanged =
     state.pendingProjectDeletions !== previousProjectDeletions;
+  const artifactDirtyChanged =
+    state.dirtyArtifactIds !== previousArtifactDirty;
+  const artifactDeletionsChanged =
+    state.pendingArtifactDeletions !== previousArtifactDeletions;
   previousDirty = state.dirtyConversationIds;
   previousDeletions = state.pendingDeletions;
   previousProjectDirty = state.dirtyProjectIds;
   previousProjectDeletions = state.pendingProjectDeletions;
+  previousArtifactDirty = state.dirtyArtifactIds;
+  previousArtifactDeletions = state.pendingArtifactDeletions;
   if (
     !dirtyChanged &&
     !deletionsChanged &&
     !projectDirtyChanged &&
-    !projectDeletionsChanged
+    !projectDeletionsChanged &&
+    !artifactDirtyChanged &&
+    !artifactDeletionsChanged
   ) {
     return;
   }
@@ -482,7 +548,9 @@ useAppStore.subscribe((state) => {
     state.dirtyConversationIds.length === 0 &&
     state.pendingDeletions.length === 0 &&
     state.dirtyProjectIds.length === 0 &&
-    state.pendingProjectDeletions.length === 0
+    state.pendingProjectDeletions.length === 0 &&
+    state.dirtyArtifactIds.length === 0 &&
+    state.pendingArtifactDeletions.length === 0
   ) {
     return;
   }

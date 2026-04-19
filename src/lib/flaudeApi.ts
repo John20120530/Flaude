@@ -353,10 +353,35 @@ export interface SyncProject {
   deletedAt?: number | null;
 }
 
+/**
+ * Wire shape of an artifact. Mirrors server/src/sync.ts.
+ *
+ * `messageId` is a loose ref — the server never enforces the FK and the
+ * client tolerates dangling values (auto-promoted artifacts use ad-hoc ids
+ * and legacy rows may predate the owning message).
+ *
+ * Tombstoned rows may ship `content: ''` to save bandwidth; the client
+ * already knows to drop the row from `deletedAt != null`.
+ */
+export interface SyncArtifact {
+  id: string;
+  messageId?: string | null;
+  type: string;
+  title: string;
+  language?: string | null;
+  content: string;
+  createdAt: number;
+  updatedAt: number;
+  /** Unix ms of soft-delete. NULL/undefined = live artifact. */
+  deletedAt?: number | null;
+}
+
 export interface SyncPullResponse {
   conversations: SyncConversation[];
   /** Added in Phase 3.1. Older servers may omit this — treat as empty. */
   projects?: SyncProject[];
+  /** Added in Phase 3.2. Older servers may omit this — treat as empty. */
+  artifacts?: SyncArtifact[];
   /** Pass this as `since` on the next pull. Ms. */
   server_time: number;
 }
@@ -377,6 +402,9 @@ export function syncPush(args: {
   /** New in Phase 3.1. Server ignores these if it predates the migration. */
   projectUpserts?: SyncProject[];
   projectDeletions?: string[];
+  /** New in Phase 3.2. Server ignores these if it predates the migration. */
+  artifactUpserts?: SyncArtifact[];
+  artifactDeletions?: string[];
 }): Promise<SyncPushResponse> {
   return authPostJson<SyncPushResponse>('/sync/push', args);
 }

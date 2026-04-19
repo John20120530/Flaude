@@ -12,6 +12,8 @@
     "db:migrate:remote": "wrangler d1 execute flaude --remote --file=./migrations/001_sync.sql",
     "db:migrate:projects": "wrangler d1 execute flaude --local --file=./migrations/002_projects.sql",
     "db:migrate:projects:remote": "wrangler d1 execute flaude --remote --file=./migrations/002_projects.sql",
+    "db:migrate:artifacts": "wrangler d1 execute flaude --local --file=./migrations/003_artifacts.sql",
+    "db:migrate:artifacts:remote": "wrangler d1 execute flaude --remote --file=./migrations/003_artifacts.sql",
     "db:shell": "wrangler d1 execute flaude --local --command",
     "typecheck": "tsc --noEmit"
   },

@@ -154,3 +154,29 @@ CREATE TABLE IF NOT EXISTS projects (
 
 CREATE INDEX IF NOT EXISTS idx_projects_user_updated
   ON projects(user_id, updated_at DESC);
+
+-- -----------------------------------------------------------------------------
+-- artifacts (Phase 3.2)
+--   Claude-style viewable deliverables (html / react / svg / mermaid /
+--   markdown / code) extracted from assistant replies. Same LWW +
+--   tombstone / client-generated TEXT id / ms timestamps as conversations.
+--
+--   message_id is a loose ref — no FK, because (a) push ordering isn't
+--   guaranteed and (b) auto-promoted artifacts can carry an ad-hoc id
+--   that doesn't match a real message row. Clients tolerate dangling refs.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS artifacts (
+  id           TEXT PRIMARY KEY,
+  user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  message_id   TEXT,
+  type         TEXT NOT NULL,
+  title        TEXT NOT NULL DEFAULT '',
+  language     TEXT,
+  content      TEXT NOT NULL,
+  created_at   INTEGER NOT NULL,                -- ms, client-supplied
+  updated_at   INTEGER NOT NULL,                -- ms, client-supplied
+  deleted_at   INTEGER                          -- ms, NULL = live
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifacts_user_updated
+  ON artifacts(user_id, updated_at DESC);

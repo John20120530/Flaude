@@ -12,7 +12,7 @@ import type {
   ToolCall,
   WorkMode,
 } from '@/types';
-import type { Artifact } from '@/lib/artifacts';
+import type { Artifact, ArtifactType } from '@/lib/artifacts';
 import { DEFAULT_MODEL_BY_MODE, DEFAULT_PROVIDERS } from '@/config/providers';
 import { BUILTIN_SLASH_COMMANDS } from '@/lib/slashCommands';
 import { BUILTIN_SKILLS } from '@/lib/builtinSkills';
@@ -168,6 +168,15 @@ interface AppState {
    */
   dirtyProjectIds: string[];
   pendingProjectDeletions: string[];
+  /**
+   * Artifact-side twins. Streaming triggers upsertArtifact every token,
+   * which marks dirty every token — the existing 800ms push debounce is
+   * what keeps this cheap. One push sends the CURRENT state of each dirty
+   * artifact (not per-token deltas), so cost is bounded by artifact count
+   * not token count.
+   */
+  dirtyArtifactIds: string[];
+  pendingArtifactDeletions: string[];
   syncState: 'idle' | 'pulling' | 'pushing' | 'error';
   syncError: string | null;
   /**
@@ -279,6 +288,12 @@ interface AppState {
   markAllProjectsDirty: () => void;
   clearProjectDirty: (ids: string[]) => void;
   clearPendingProjectDeletions: (ids: string[]) => void;
+  /** Mark an artifact as having unpushed local edits. */
+  markArtifactDirty: (id: string) => void;
+  /** Mark every artifact dirty. Used by first-run seed + "resync everything". */
+  markAllArtifactsDirty: () => void;
+  clearArtifactDirty: (ids: string[]) => void;
+  clearPendingArtifactDeletions: (ids: string[]) => void;
   setLastSyncAt: (ts: number | null) => void;
   setSyncState: (state: 'idle' | 'pulling' | 'pushing' | 'error', err?: string | null) => void;
   /**
@@ -295,6 +310,13 @@ interface AppState {
    * see it bite someone in practice.
    */
   applyPulledProjects: (projects: import('@/lib/flaudeApi').SyncProject[]) => void;
+  /**
+   * Artifacts pulled from the server. LWW + tombstone, same as above. No
+   * conflict toast — artifacts are model output, not user-authored prose,
+   * and a quiet clobber matches how the user already perceives them
+   * (regenerate replaces rather than merges).
+   */
+  applyPulledArtifacts: (artifacts: import('@/lib/flaudeApi').SyncArtifact[]) => void;
 
   /**
    * Dismiss a conflict without restoring — user has acknowledged that the
@@ -346,6 +368,8 @@ export const useAppStore = create<AppState>()(
       pendingDeletions: [],
       dirtyProjectIds: [],
       pendingProjectDeletions: [],
+      dirtyArtifactIds: [],
+      pendingArtifactDeletions: [],
       syncState: 'idle',
       syncError: null,
       conflictRecords: [],
@@ -706,9 +730,25 @@ export const useAppStore = create<AppState>()(
       // to the panel if the user just closed it mid-reply.
       upsertArtifact: (artifact) =>
         set((s) => {
-          const isNew = !s.artifacts[artifact.id];
+          const existing = s.artifacts[artifact.id];
+          const isNew = !existing;
+          // Preserve the original createdAt across streaming updates — the
+          // parser in lib/artifacts.ts stamps Date.now() on every call,
+          // which used to jitter createdAt by ~1 second per token. LWW
+          // doesn't care about createdAt but the UI does (sort order), and
+          // server sync definitely does.
+          //
+          // Stamp a fresh updatedAt here instead of trusting the caller.
+          // Every upsert is a mutation, and the dirty-mark that follows
+          // assumes updatedAt is monotonic.
+          const stamped: Artifact = {
+            ...artifact,
+            createdAt: existing?.createdAt ?? artifact.createdAt,
+            updatedAt: Date.now(),
+          };
           return {
-            artifacts: { ...s.artifacts, [artifact.id]: artifact },
+            artifacts: { ...s.artifacts, [artifact.id]: stamped },
+            dirtyArtifactIds: includeDirty(s.dirtyArtifactIds, artifact.id),
             ...(isNew
               ? { activeArtifactId: artifact.id, artifactsOpen: true }
               : {}),
@@ -722,6 +762,7 @@ export const useAppStore = create<AppState>()(
       //     empty panel is worse than just hiding it.
       deleteArtifact: (id) =>
         set((s) => {
+          const existed = !!s.artifacts[id];
           const copy = { ...s.artifacts };
           delete copy[id];
           const remaining = Object.values(copy);
@@ -735,10 +776,22 @@ export const useAppStore = create<AppState>()(
                 ? remaining.reduce((a, b) => (b.createdAt > a.createdAt ? b : a)).id
                 : null;
           }
+          // Tombstone-queue policy matches projects: if the artifact was
+          // dirty-and-never-synced (we've never hit /sync/push since it was
+          // created) we don't need a tombstone; otherwise queue one so the
+          // server flips its deleted_at. Use `lastSyncAt !== null` as the
+          // "has this client ever synced" proxy.
+          const neverPushed =
+            s.dirtyArtifactIds.includes(id) && s.lastSyncAt === null;
           return {
             artifacts: copy,
             activeArtifactId: nextActive,
             artifactsOpen: remaining.length > 0 ? s.artifactsOpen : false,
+            dirtyArtifactIds: s.dirtyArtifactIds.filter((x) => x !== id),
+            pendingArtifactDeletions:
+              existed && !neverPushed
+                ? includeDirty(s.pendingArtifactDeletions, id)
+                : s.pendingArtifactDeletions,
           };
         }),
       setActiveArtifact: (id) =>
@@ -907,6 +960,8 @@ export const useAppStore = create<AppState>()(
           pendingDeletions: [],
           dirtyProjectIds: [],
           pendingProjectDeletions: [],
+          dirtyArtifactIds: [],
+          pendingArtifactDeletions: [],
           syncState: 'idle',
           syncError: null,
           conflictRecords: [],
@@ -957,6 +1012,27 @@ export const useAppStore = create<AppState>()(
       clearPendingProjectDeletions: (ids) =>
         set((s) => ({
           pendingProjectDeletions: s.pendingProjectDeletions.filter(
+            (id) => !ids.includes(id),
+          ),
+        })),
+      markArtifactDirty: (id) =>
+        set((s) => {
+          if (s.dirtyArtifactIds.includes(id)) return s;
+          return { dirtyArtifactIds: [...s.dirtyArtifactIds, id] };
+        }),
+      markAllArtifactsDirty: () =>
+        set((s) => {
+          const ids = Object.keys(s.artifacts);
+          const merged = new Set([...s.dirtyArtifactIds, ...ids]);
+          return { dirtyArtifactIds: [...merged] };
+        }),
+      clearArtifactDirty: (ids) =>
+        set((s) => ({
+          dirtyArtifactIds: s.dirtyArtifactIds.filter((id) => !ids.includes(id)),
+        })),
+      clearPendingArtifactDeletions: (ids) =>
+        set((s) => ({
+          pendingArtifactDeletions: s.pendingArtifactDeletions.filter(
             (id) => !ids.includes(id),
           ),
         })),
@@ -1191,6 +1267,73 @@ export const useAppStore = create<AppState>()(
           };
         }),
 
+      applyPulledArtifacts: (pulled) =>
+        set((s) => {
+          if (pulled.length === 0) return s;
+          const next = { ...s.artifacts };
+          const tombstonedLocally = new Set<string>();
+
+          for (const p of pulled) {
+            if (p.deletedAt != null) {
+              if (next[p.id]) {
+                delete next[p.id];
+                tombstonedLocally.add(p.id);
+              }
+              continue;
+            }
+
+            const existing = next[p.id];
+            // LWW: local strictly newer → keep local. `updatedAt ?? createdAt`
+            // handles pre-migration rehydrated rows that don't have updatedAt
+            // set yet; createdAt is always present.
+            const existingUpdated = existing?.updatedAt ?? existing?.createdAt ?? 0;
+            if (existing && existingUpdated > p.updatedAt) continue;
+
+            const merged: Artifact = {
+              id: p.id,
+              messageId: p.messageId ?? undefined,
+              // Only a handful of known types. Fall back to 'code' for anything
+              // unrecognised so the UI renders something rather than blowing up.
+              type: (
+                ['html', 'react', 'svg', 'mermaid', 'markdown', 'code'] as const
+              ).includes(p.type as ArtifactType)
+                ? (p.type as ArtifactType)
+                : 'code',
+              title: p.title,
+              language: p.language ?? undefined,
+              content: p.content,
+              createdAt: p.createdAt,
+              updatedAt: p.updatedAt,
+            };
+            next[p.id] = merged;
+          }
+
+          // If the active artifact got tombstoned, fall back to the newest
+          // remaining one (same heuristic as deleteArtifact).
+          let nextActive = s.activeArtifactId;
+          if (nextActive && tombstonedLocally.has(nextActive)) {
+            const remaining = Object.values(next);
+            nextActive =
+              remaining.length > 0
+                ? remaining.reduce((a, b) => (b.createdAt > a.createdAt ? b : a)).id
+                : null;
+          }
+
+          const pulledIds = new Set(pulled.map((p) => p.id));
+          return {
+            artifacts: next,
+            activeArtifactId: nextActive,
+            // Close the panel if every artifact is gone — same UX as
+            // deleteArtifact. Otherwise leave the user's open/closed state.
+            artifactsOpen:
+              Object.keys(next).length > 0 ? s.artifactsOpen : false,
+            dirtyArtifactIds: s.dirtyArtifactIds.filter((id) => !pulledIds.has(id)),
+            pendingArtifactDeletions: s.pendingArtifactDeletions.filter(
+              (id) => !tombstonedLocally.has(id),
+            ),
+          };
+        }),
+
       dismissConflict: (conversationId) =>
         set((s) => ({
           conflictRecords: s.conflictRecords.filter(
@@ -1292,6 +1435,8 @@ export const useAppStore = create<AppState>()(
         pendingDeletions: s.pendingDeletions,
         dirtyProjectIds: s.dirtyProjectIds,
         pendingProjectDeletions: s.pendingProjectDeletions,
+        dirtyArtifactIds: s.dirtyArtifactIds,
+        pendingArtifactDeletions: s.pendingArtifactDeletions,
       }),
       onRehydrateStorage: () => (state) => {
         if (!state) return;

@@ -28,6 +28,14 @@ export interface Artifact {
   language?: string;     // For code artifacts
   content: string;
   createdAt: number;
+  /**
+   * Last-edit timestamp (ms). Added in Phase 3.2 for LWW sync. Optional on
+   * the type so pre-migration persisted rows don't crash on rehydrate —
+   * the store stamps `updatedAt = Date.now()` on every upsert anyway, so
+   * any rehydrated row gets a fresh value the moment it's touched. Consumers
+   * that care (server sync) fall back to `updatedAt ?? createdAt`.
+   */
+  updatedAt?: number;
 }
 
 export interface ParsedMessage {
