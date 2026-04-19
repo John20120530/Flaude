@@ -21,6 +21,22 @@ interface Props {
 }
 
 /**
+ * Auto-collapse thresholds. Chosen empirically: 20 lines is about a screen
+ * worth, 2000 chars catches long one-liners (e.g. stringified JSON
+ * responses). When exceeded, the pane shows a truncated preview + a "show
+ * all" button. The user can still manually toggle the whole card closed;
+ * this is a second, finer gate inside an already-opened card.
+ *
+ * Why do this: `fs_read_file` on a 1000-line source file, or `shell_exec`
+ * tailing a build log, used to blow up the card height and drown the
+ * conversation scrollback even though max-h-80 + scroll kept it bounded.
+ * A fold + hint reads much better: "got 847 lines, click if you care".
+ */
+const AUTO_COLLAPSE_MAX_LINES = 20;
+const AUTO_COLLAPSE_MAX_CHARS = 2000;
+const AUTO_COLLAPSE_PREVIEW_LINES = 12;
+
+/**
  * A compact card showing one tool invocation: name, status, and expandable
  * arguments / result. Mimics Claude's "Using X..." affordance.
  */
@@ -78,22 +94,18 @@ export default function ToolCallCard({ call, resultContent }: Props) {
       {open && (
         <div className="px-3 pb-3 pt-1 space-y-2">
           <Section title="参数">
-            <pre className="text-[11px] font-mono whitespace-pre-wrap break-words p-2 rounded bg-black/[0.04] dark:bg-white/[0.04] text-claude-ink dark:text-night-ink max-h-60 overflow-y-auto">
-              {argsPretty || '(无参数)'}
-            </pre>
+            <FoldablePre
+              text={argsPretty || '(无参数)'}
+              maxHeightClass="max-h-60"
+            />
           </Section>
           {(call.status === 'success' || call.status === 'error') && displayResult && (
             <Section title={call.status === 'error' ? '错误' : '结果'}>
-              <pre
-                className={cn(
-                  'text-[11px] font-mono whitespace-pre-wrap break-words p-2 rounded max-h-80 overflow-y-auto',
-                  call.status === 'error'
-                    ? 'bg-red-100/60 dark:bg-red-950/30 text-red-800 dark:text-red-200'
-                    : 'bg-black/[0.04] dark:bg-white/[0.04]'
-                )}
-              >
-                {displayResult}
-              </pre>
+              <FoldablePre
+                text={displayResult}
+                maxHeightClass="max-h-80"
+                tone={call.status === 'error' ? 'error' : 'default'}
+              />
             </Section>
           )}
         </div>
@@ -109,6 +121,61 @@ function Section({ title, children }: { title: string; children: React.ReactNode
         {title}
       </div>
       {children}
+    </div>
+  );
+}
+
+/**
+ * A <pre> that auto-folds if `text` is too long. Small outputs (<= thresholds)
+ * render in full exactly like before. Large outputs start truncated with a
+ * "show all N lines" toggle. Keeps the existing max-h-* + scroll for the
+ * expanded state so very long results still don't hijack the viewport.
+ */
+function FoldablePre({
+  text,
+  maxHeightClass,
+  tone = 'default',
+}: {
+  text: string;
+  maxHeightClass: string;
+  tone?: 'default' | 'error';
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  const lines = text.split('\n');
+  const lineCount = lines.length;
+  const charCount = text.length;
+  const needsFold =
+    lineCount > AUTO_COLLAPSE_MAX_LINES || charCount > AUTO_COLLAPSE_MAX_CHARS;
+
+  const shown = !needsFold || expanded
+    ? text
+    : lines.slice(0, AUTO_COLLAPSE_PREVIEW_LINES).join('\n');
+
+  const preClass = cn(
+    'text-[11px] font-mono whitespace-pre-wrap break-words p-2 rounded overflow-y-auto',
+    // Only cap the height when fully expanded — the preview is already short
+    // enough that a max-height would just add an unnecessary inner scrollbar.
+    (!needsFold || expanded) && maxHeightClass,
+    tone === 'error'
+      ? 'bg-red-100/60 dark:bg-red-950/30 text-red-800 dark:text-red-200'
+      : 'bg-black/[0.04] dark:bg-white/[0.04] text-claude-ink dark:text-night-ink'
+  );
+
+  return (
+    <div>
+      <pre className={preClass}>{shown}</pre>
+      {needsFold && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-1 text-[11px] text-claude-accent hover:underline"
+        >
+          {expanded
+            ? '收起'
+            : `显示全部（共 ${lineCount} 行 / ${charCount} 字符）`}
+        </button>
+      )}
     </div>
   );
 }
