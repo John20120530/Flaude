@@ -19,11 +19,20 @@
  *   - Poll periodically. Single-device single-user (the common case) doesn't
  *     need it; multi-device users get fresh data on next login. If that ever
  *     becomes a real complaint, add a 30s interval here.
- *   - Retry on network failure with backoff. If a push fails we leave the
- *     dirty set intact and try again on the next trigger. Good enough for
- *     a friends-group deployment; revisit if flaky networks become routine.
  *   - Handle conflict resolution beyond LWW. Server does the real enforcement
  *     (see server/src/sync.ts "LWW" comments).
+ *
+ * What this DOES do for transient failures:
+ *   - Exponential backoff retry: 1s → 5s → 30s → 2min, then give up and
+ *     flip to 'error' state. Only retryable errors count (network-layer
+ *     throws, server 5xx); 4xx means the client sent something wrong and
+ *     retrying won't help. 401/403 are already redirected by authFetch.
+ *   - During the retry window the syncState stays as 'pulling'/'pushing'
+ *     so the sidebar spinner keeps spinning — from the user's POV it's
+ *     "still trying", not "failed".
+ *   - A fresh explicit trigger (user edit → schedulePush, or another
+ *     pullNow call) cancels the pending retry timer. Users always beat
+ *     the backoff clock.
  *
  * All network calls route through flaudeApi.authFetch, so 401/403 already
  * auto-drops to the login screen. We never need to check auth inline here.
@@ -64,6 +73,46 @@ let pushInFlight: Promise<void> | null = null;
  * and return it on re-entry, same pattern as pullInFlight/pushInFlight above.
  */
 let startSyncInFlight: Promise<void> | null = null;
+
+// -----------------------------------------------------------------------------
+// Retry state. Separate counters/timers for pull and push so a flapping push
+// doesn't delay a perfectly-fine pull (or vice versa). Counter is reset on
+// a successful round-trip; schedulePull/PushRetry increments.
+// -----------------------------------------------------------------------------
+const RETRY_DELAYS_MS = [1_000, 5_000, 30_000, 120_000];
+
+let pullRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let pullRetryAttempt = 0;
+let pushRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let pushRetryAttempt = 0;
+
+/**
+ * Transient-vs-permanent error classification. `FlaudeApiError` carries a
+ * status, so we branch on it; anything else came from the fetch layer
+ * (network unreachable, DNS, TLS handshake, abort) and is worth retrying.
+ *
+ * 401/403 never reach us — authFetch intercepts and clears auth.
+ * 400 / 404 / 422 are client bugs — retrying won't fix them.
+ * 5xx is transient server state — retry.
+ */
+function isRetryable(err: unknown): boolean {
+  if (err instanceof FlaudeApiError) return err.status >= 500;
+  return true;
+}
+
+function clearPullRetry(): void {
+  if (pullRetryTimer) {
+    clearTimeout(pullRetryTimer);
+    pullRetryTimer = null;
+  }
+}
+
+function clearPushRetry(): void {
+  if (pushRetryTimer) {
+    clearTimeout(pushRetryTimer);
+    pushRetryTimer = null;
+  }
+}
 
 // -----------------------------------------------------------------------------
 // Client-local → wire shape conversion. Kept in this file (not in the store)
@@ -128,6 +177,12 @@ export async function pullNow(): Promise<void> {
   const store = useAppStore.getState();
   if (!store.auth) return;
 
+  // Any explicit call preempts a scheduled retry — we're trying right now,
+  // no reason to keep the old timer pending. The counter is preserved; it
+  // only resets on success (so a sequence of "user keeps clicking retry
+  // while the server is down" still caps at 4 attempts total).
+  clearPullRetry();
+
   store.setSyncState('pulling');
   const since = store.lastSyncAt ?? 0;
 
@@ -138,11 +193,28 @@ export async function pullNow(): Promise<void> {
       s.applyPulledConversations(res.conversations);
       s.setLastSyncAt(res.server_time);
       s.setSyncState('idle');
+      pullRetryAttempt = 0; // clean round-trip → fresh budget next time
     } catch (err) {
       const msg =
         err instanceof FlaudeApiError ? err.message : (err as Error).message;
-      console.error('[sync] pull failed:', msg);
-      useAppStore.getState().setSyncState('error', msg);
+
+      if (isRetryable(err) && pullRetryAttempt < RETRY_DELAYS_MS.length) {
+        const delay = RETRY_DELAYS_MS[pullRetryAttempt];
+        pullRetryAttempt++;
+        console.warn(
+          `[sync] pull failed (${msg}); retry ${pullRetryAttempt}/${RETRY_DELAYS_MS.length} in ${delay}ms`,
+        );
+        // Stay in 'pulling' so the spinner keeps turning. Users shouldn't
+        // see a red error flash for a hiccup we're about to recover from.
+        pullRetryTimer = setTimeout(() => {
+          pullRetryTimer = null;
+          void pullNow();
+        }, delay);
+      } else {
+        console.error('[sync] pull failed permanently:', msg);
+        pullRetryAttempt = 0;
+        useAppStore.getState().setSyncState('error', msg);
+      }
       // Don't rethrow — pull failures shouldn't crash the app. Next trigger
       // (next login, next manual retry) tries again.
     } finally {
@@ -165,6 +237,9 @@ export async function pushNow(): Promise<void> {
   const deletionIds = [...store.pendingDeletions];
   if (dirtyIds.length === 0 && deletionIds.length === 0) return;
 
+  // Preempt pending retry — see the matching comment in pullNow.
+  clearPushRetry();
+
   store.setSyncState('pushing');
 
   const dirtySet = new Set(dirtyIds);
@@ -183,6 +258,7 @@ export async function pushNow(): Promise<void> {
       s.clearDirty(dirtyIds);
       s.clearPendingDeletions(deletionIds);
       s.setSyncState('idle');
+      pushRetryAttempt = 0;
 
       // After a successful push, the server now has newer rows than our
       // cursor. Pulling would return the rows we just pushed (wasted round
@@ -202,8 +278,22 @@ export async function pushNow(): Promise<void> {
     } catch (err) {
       const msg =
         err instanceof FlaudeApiError ? err.message : (err as Error).message;
-      console.error('[sync] push failed:', msg);
-      useAppStore.getState().setSyncState('error', msg);
+
+      if (isRetryable(err) && pushRetryAttempt < RETRY_DELAYS_MS.length) {
+        const delay = RETRY_DELAYS_MS[pushRetryAttempt];
+        pushRetryAttempt++;
+        console.warn(
+          `[sync] push failed (${msg}); retry ${pushRetryAttempt}/${RETRY_DELAYS_MS.length} in ${delay}ms`,
+        );
+        pushRetryTimer = setTimeout(() => {
+          pushRetryTimer = null;
+          void pushNow();
+        }, delay);
+      } else {
+        console.error('[sync] push failed permanently:', msg);
+        pushRetryAttempt = 0;
+        useAppStore.getState().setSyncState('error', msg);
+      }
       // dirty/pendingDeletions stay intact; next trigger retries.
     } finally {
       pushInFlight = null;
