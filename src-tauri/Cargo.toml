@@ -18,6 +18,16 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+# Updater plugin — checks `latest.json` on GitHub Releases and swaps the app
+# binary in place. Signed with the ed25519 keypair the user generates via
+# `pnpm tauri signer generate`; the public key lives in tauri.conf.json, the
+# private key stays out of the repo and is passed to the CI at release time.
+# See RELEASE.md for the full generate → publish → verify flow.
+tauri-plugin-updater = "2"
+# Process plugin — just needed for `relaunch()` after the updater swaps the
+# binary. No other use; we deliberately don't expose `exit()` because the
+# frontend doesn't need to force-quit the whole process for any feature.
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # tokio drives our async file + process commands. `rt-multi-thread` is
@@ -28,6 +38,9 @@ tokio = { version = "1", features = [
   "macros",
   "process",
   "rt-multi-thread",
+  # `sync` brings mpsc / Notify / async Mutex — used by bgshell.rs to wake
+  # shell_read waiters and serialize stdin writes.
+  "sync",
   "time",
 ] }
 # portable-pty wraps the platform PTY APIs (ConPTY on Windows 10+, openpty on

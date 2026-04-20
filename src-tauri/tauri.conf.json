@@ -30,7 +30,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis", "msi"],
     "category": "DeveloperTool",
     "shortDescription": "Claude-like client for Chinese open-source LLMs",
     "longDescription": "Flaude is a desktop client that routes requests to Chinese open-source models (DeepSeek, Qwen, GLM, Kimi, MiniMax) with two work modes: Chat and Code.",
@@ -40,6 +40,25 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true,
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "displayLanguageSelector": false,
+        "languages": ["SimpChinese", "English"]
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "dialog": false,
+      "endpoints": [
+        "https://github.com/USER/REPO/releases/latest/download/latest.json"
+      ],
+      "pubkey": "REPLACE_WITH_OUTPUT_OF_pnpm_tauri_signer_generate"
+    }
   }
 }

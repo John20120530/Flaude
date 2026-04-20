@@ -4,6 +4,7 @@ import Sidebar from './Sidebar';
 import TopBar from './TopBar';
 import ArtifactsPanel from './ArtifactsPanel';
 import ConflictToasts from './ConflictToasts';
+import UpdateBanner from './UpdateBanner';
 import WriteApprovalModal from '@/components/code/WriteApprovalModal';
 import { cn } from '@/lib/utils';
 
@@ -101,6 +102,11 @@ export default function AppShell() {
         cost of "always mounted" is effectively zero.
       */}
       <WriteApprovalModal />
+      {/*
+        Desktop-only auto-update banner. Self-guards on isTauri() and on a
+        null manifest, so it's free to leave mounted everywhere.
+      */}
+      <UpdateBanner />
     </div>
   );
 }

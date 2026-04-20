@@ -1,0 +1,139 @@
+# Release workflow — build Windows installers and publish to GitHub Releases.
+#
+# Triggered by pushing a tag that matches `v*` (e.g. `git tag v0.2.0 && git
+# push origin v0.2.0`). For pre-release testing the workflow also accepts a
+# manual dispatch, which produces the artifacts without creating a release.
+#
+# What it produces:
+#   - Flaude_X.Y.Z_x64-setup.exe   — NSIS installer, per-user, no admin
+#   - Flaude_X.Y.Z_x64_en-US.msi   — MSI installer, enterprise-friendly
+#   - latest.json                   — updater manifest consumed by the app
+#   - Each installer is signed with the ed25519 *updater* key (not code-
+#     signed — see RELEASE.md for the signing-gap rationale).
+#
+# Required secrets (set in repo Settings → Secrets and variables → Actions):
+#   TAURI_SIGNING_PRIVATE_KEY          — contents of `~/.tauri/flaude.key`
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD — the password you picked at generate
+#
+# If the secrets are missing the build still succeeds but the installers
+# won't verify against the public key in tauri.conf.json, so the in-app
+# updater will refuse them. That's the intended failure mode: better a
+# broken update than one whose authenticity we can't prove.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: 'Publish as a draft (manual review before it goes live)?'
+        type: boolean
+        default: true
+
+jobs:
+  build-windows:
+    # Windows-only for now — the client is Windows-first per ROADMAP.
+    # Adding `matrix: { os: [windows-latest, macos-latest, ubuntu-latest] }`
+    # later is trivial; Tauri's own build script DTRT on each host.
+    runs-on: windows-latest
+    permissions:
+      contents: write  # needed for creating the Release + uploading assets
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Cargo fetch takes ~4 minutes cold; cache the target directory so the
+      # second run of this workflow is ~90 seconds instead.
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri bundle
+        env:
+          # Updater signing — see comment block at the top of this file.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri:build
+
+      # The bundler emits files with names like
+      # `Flaude_0.2.0_x64-setup.nsis.zip.sig` next to the installer. We
+      # collect them alongside the installers so users can re-verify the
+      # signature manually if they care.
+      - name: Collect artifacts
+        id: collect
+        shell: pwsh
+        run: |
+          $out = "release-out"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $bundleRoot = "src-tauri/target/release/bundle"
+          Get-ChildItem -Path "$bundleRoot/nsis" -Recurse -Include *.exe,*.sig -File -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName -Destination $out -Force }
+          Get-ChildItem -Path "$bundleRoot/msi" -Recurse -Include *.msi,*.sig -File -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName -Destination $out -Force }
+          Get-ChildItem -Path $out | Format-Table Name, Length
+          "artifact_dir=$out" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # Build the updater manifest. The app's endpoint field expects this
+      # exact JSON structure at /releases/latest/download/latest.json. We
+      # don't fill in darwin/linux yet since CI only builds Windows here.
+      - name: Write latest.json
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if (-not $tag -or $tag -eq "") { $tag = "v0.0.0-dev" }
+          $version = $tag.TrimStart('v')
+          $nsis = Get-ChildItem -Path "${{ steps.collect.outputs.artifact_dir }}" -Filter "*-setup.exe" | Select-Object -First 1
+          $sigFile = Get-ChildItem -Path "${{ steps.collect.outputs.artifact_dir }}" -Filter "$($nsis.Name).sig" | Select-Object -First 1
+          $sig = if ($sigFile) { Get-Content -Raw $sigFile.FullName } else { "" }
+          $url = "https://github.com/${{ github.repository }}/releases/download/$tag/$($nsis.Name)"
+          $manifest = @{
+            version   = $version
+            notes     = "See the GitHub Release page for release notes."
+            pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            platforms = @{
+              "windows-x86_64" = @{
+                signature = $sig
+                url       = $url
+              }
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 5 | Out-File -FilePath "${{ steps.collect.outputs.artifact_dir }}/latest.json" -Encoding UTF8
+          Get-Content "${{ steps.collect.outputs.artifact_dir }}/latest.json"
+
+      - name: Upload artifacts (for manual dispatch inspection)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: flaude-windows
+          path: ${{ steps.collect.outputs.artifact_dir }}
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          # Auto-generates a release page from the commit messages since the
+          # last tag. Users who want a curated changelog can edit the release
+          # post-publish — the workflow doesn't overwrite existing content.
+          generate_release_notes: true
+          files: |
+            ${{ steps.collect.outputs.artifact_dir }}/*
