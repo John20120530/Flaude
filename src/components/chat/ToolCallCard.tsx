@@ -10,7 +10,7 @@ import {
   ListChecks,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import type { AgentTodo, ToolCall } from '@/types';
+import type { TodoItem, ToolCall } from '@/types';
 
 interface Props {
   call: ToolCall;
@@ -141,13 +141,13 @@ export default function ToolCallCard({ call, resultContent }: Props) {
  * returning null in the latter case so the caller falls back to the
  * generic card until the parse completes.
  */
-function extractTodos(args: Record<string, unknown> | unknown): AgentTodo[] | null {
+function extractTodos(args: Record<string, unknown> | unknown): TodoItem[] | null {
   if (!args || typeof args !== 'object') return null;
   const obj = args as Record<string, unknown>;
   if ('__raw' in obj) return null;
   const raw = obj.todos;
   if (!Array.isArray(raw)) return null;
-  const out: AgentTodo[] = [];
+  const out: TodoItem[] = [];
   for (const item of raw) {
     if (!item || typeof item !== 'object') return null;
     const t = item as Record<string, unknown>;
@@ -169,7 +169,7 @@ function TodoListCard({
   statusIcon,
   statusLabel,
 }: {
-  todos: AgentTodo[];
+  todos: TodoItem[];
   status: ToolCall['status'];
   statusIcon: React.ReactNode;
   statusLabel: string;
@@ -225,7 +225,7 @@ function TodoListCard({
   );
 }
 
-function TodoIcon({ status }: { status: AgentTodo['status'] }) {
+function TodoIcon({ status }: { status: TodoItem['status'] }) {
   if (status === 'completed') {
     return (
       <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0 text-green-600" />

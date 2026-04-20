@@ -228,7 +228,7 @@ describe('buildAccountBundle content', () => {
           submittedAt: Date.now(),
         },
       ],
-      agentTodos: { c1: [{ content: 'x', activeForm: 'X', status: 'pending' }] },
+      conversationTodos: { c1: [{ content: 'x', activeForm: 'X', status: 'pending' }] },
       conflictRecords: [
         {
           conversationId: 'c1',

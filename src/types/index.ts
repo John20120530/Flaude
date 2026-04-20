@@ -23,21 +23,6 @@ export interface ToolCall {
   error?: string;
 }
 
-/**
- * An entry in the Code agent's self-maintained task list. The agent calls
- * the built-in `todo_write` tool to publish a new snapshot of its task
- * breakdown, and that snapshot is rendered as a checklist in the
- * conversation. The shape intentionally mirrors Claude Code's TodoWrite
- * tool so prompt guidance that assumes that schema works unchanged.
- */
-export interface AgentTodo {
-  /** Imperative description: "Run tests", "Wire the bridge". */
-  content: string;
-  /** Present continuous form shown while in progress: "Running tests". */
-  activeForm: string;
-  status: 'pending' | 'in_progress' | 'completed';
-}
-
 export interface Message {
   id: string;
   role: MessageRole;
@@ -193,6 +178,24 @@ export interface SlashCommand {
  * engineering, packaged and reusable. Think Anthropic Claude Skills: SKILL.md
  * with a frontmatter + body.
  */
+/**
+ * Agent self-managed todo item. Written by the `todo_write` tool so a Code-mode
+ * agent can expose its plan for a multi-step task. Modeled directly on Claude
+ * Code's TodoWrite: each entry carries both an imperative form (for the list
+ * view) and a present-continuous form (shown while in_progress), plus a
+ * status. We keep the tool contract — and therefore this type — stable across
+ * calls so the agent can diff against what it wrote last time.
+ */
+export type TodoStatus = 'pending' | 'in_progress' | 'completed';
+
+export interface TodoItem {
+  /** Imperative form, e.g. "Fix the auth bug". Used in the list view. */
+  content: string;
+  /** Present-continuous form, e.g. "Fixing the auth bug". Shown when status=in_progress. */
+  activeForm: string;
+  status: TodoStatus;
+}
+
 export interface Skill {
   id: string;
   /** Short kebab-case identifier, e.g. "code-review". Shown to the model. */

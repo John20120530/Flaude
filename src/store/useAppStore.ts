@@ -1,7 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type {
-  AgentTodo,
   Attachment,
   Conversation,
   MCPServer,
@@ -10,6 +9,7 @@ import type {
   ProviderConfig,
   Skill,
   SlashCommand,
+  TodoItem,
   ToolCall,
   WorkMode,
 } from '@/types';
@@ -164,14 +164,18 @@ interface AppState {
   pendingWrites: PendingWrite[];
 
   /**
-   * Per-conversation agent todo lists, keyed by conversation id. Populated
-   * by the built-in `todo_write` tool so the Code agent can publish its
-   * task breakdown. Not persisted: task lists are ephemeral session state,
-   * the conversation history preserves the tool-call snapshots we actually
-   * render. Rehydrating a stale list after app restart would surface
-   * misleading "in_progress" items with no agent to drive them.
+   * Agent self-managed TODO lists, keyed by conversation id. Written by the
+   * `todo_write` builtin tool and read by the TodoPanel. Scoped per-conversation
+   * because each chat typically represents one task thread — switching
+   * conversations should show the right list, not a shared global one.
+   *
+   * Transient (not in partialize): a todo list is a working-memory artifact for
+   * the current agent turn, not durable state the user wants to survive a
+   * reload. On restart the agent rebuilds it from context if the task resumes.
+   * Also keeps the localStorage bill down — long agent sessions can accumulate
+   * lots of conversations and we don't want each one carrying a stale list.
    */
-  agentTodos: Record<string, AgentTodo[]>;
+  conversationTodos: Record<string, TodoItem[]>;
 
   // M4: Memory + Skills
   /**
@@ -322,8 +326,15 @@ interface AppState {
   /** Drop the resolved approval from the queue. Called from writeApproval.ts
    *  after the user clicks Apply or Reject. */
   removePendingWrite: (id: string) => void;
-  /** Replace the agent's task list for a conversation. Called by `todo_write`. */
-  setAgentTodos: (conversationId: string, todos: AgentTodo[]) => void;
+
+  /**
+   * Replace the todo list for a conversation (full-list write, matching the
+   * `todo_write` tool semantics). Passing an empty array clears the list,
+   * which the UI treats the same as "no todos yet" and hides the panel.
+   */
+  setConversationTodos: (conversationId: string, todos: TodoItem[]) => void;
+  /** User-initiated clear (the "清空" button on the panel). */
+  clearConversationTodos: (conversationId: string) => void;
 
   // M4: Memory + Skills
   setGlobalMemory: (text: string) => void;
@@ -420,7 +431,7 @@ export const useAppStore = create<AppState>()(
       allowFileWrites: false,
       allowShellExec: false,
       pendingWrites: [],
-      agentTodos: {},
+      conversationTodos: {},
 
       globalMemory: '',
       skills: [...BUILTIN_SKILLS],
@@ -494,11 +505,16 @@ export const useAppStore = create<AppState>()(
             // certainly been pushed at some point. Not perfect but avoids
             // keeping a "was this ever on the server" bit on every row.
             (s.conversations.find((c) => c.id === id)?.messages.length ?? 0) > 0;
-          // Drop any per-conversation agent todos so the map doesn't accumulate
-          // stale entries for deleted convs. (agentTodos isn't persisted, but
-          // it still matters for long-running sessions with a lot of churn.)
-          const nextTodos = { ...s.agentTodos };
-          delete nextTodos[id];
+          // Drop any todo list for this conversation — no point keeping working
+          // memory for a conv that no longer exists, and we don't want dead
+          // keys accumulating in `conversationTodos`.
+          const nextTodos =
+            id in s.conversationTodos
+              ? (() => {
+                  const { [id]: _drop, ...rest } = s.conversationTodos;
+                  return rest;
+                })()
+              : s.conversationTodos;
           return {
             conversations: s.conversations.filter((c) => c.id !== id),
             activeConversationId:
@@ -507,16 +523,30 @@ export const useAppStore = create<AppState>()(
             pendingDeletions: wasSynced
               ? [...s.pendingDeletions, id]
               : s.pendingDeletions,
-            agentTodos: nextTodos,
+            conversationTodos: nextTodos,
           };
         }),
       clearConversation: (id) =>
-        set((s) => ({
-          conversations: s.conversations.map((c) =>
-            c.id === id ? { ...c, messages: [], updatedAt: Date.now() } : c
-          ),
-          dirtyConversationIds: includeDirty(s.dirtyConversationIds, id),
-        })),
+        set((s) => {
+          // `/clear` wipes messages but keeps the conversation shell. Any
+          // agent-managed todo list was tied to the task those messages
+          // described — leaving it behind produces a weird UI where the
+          // chat is empty but a TODO panel still shows planned steps.
+          const nextTodos =
+            id in s.conversationTodos
+              ? (() => {
+                  const { [id]: _drop, ...rest } = s.conversationTodos;
+                  return rest;
+                })()
+              : s.conversationTodos;
+          return {
+            conversations: s.conversations.map((c) =>
+              c.id === id ? { ...c, messages: [], updatedAt: Date.now() } : c
+            ),
+            dirtyConversationIds: includeDirty(s.dirtyConversationIds, id),
+            conversationTodos: nextTodos,
+          };
+        }),
       renameConversation: (id, title) =>
         set((s) => ({
           conversations: s.conversations.map((c) =>
@@ -982,18 +1012,32 @@ export const useAppStore = create<AppState>()(
         set((s) => ({
           pendingWrites: s.pendingWrites.filter((p) => p.id !== id),
         })),
-      setAgentTodos: (conversationId, todos) =>
+
+      setConversationTodos: (conversationId, todos) =>
         set((s) => {
-          // Empty list is how the agent says "plan cleared" — keep the key
-          // present so subscribers see the transition, but don't inflate the
-          // map with stale entries for deleted conversations either.
-          const next = { ...s.agentTodos };
+          // Empty list → drop the key entirely so selectors that test
+          // `todos && todos.length` aren't fooled by a stale empty array
+          // and the record doesn't slowly accumulate dead conversation ids.
           if (todos.length === 0) {
-            delete next[conversationId];
-          } else {
-            next[conversationId] = todos;
+            if (!(conversationId in s.conversationTodos)) return s;
+            const { [conversationId]: _drop, ...rest } = s.conversationTodos;
+            return { conversationTodos: rest };
           }
-          return { agentTodos: next };
+          return {
+            conversationTodos: {
+              ...s.conversationTodos,
+              // Clone the array so downstream consumers can't mutate the
+              // stored version in place (the tool handler gets its args by
+              // reference and could — theoretically — hold onto the list).
+              [conversationId]: todos.map((t) => ({ ...t })),
+            },
+          };
+        }),
+      clearConversationTodos: (conversationId) =>
+        set((s) => {
+          if (!(conversationId in s.conversationTodos)) return s;
+          const { [conversationId]: _drop, ...rest } = s.conversationTodos;
+          return { conversationTodos: rest };
         }),
 
       // M4: Memory + Skills

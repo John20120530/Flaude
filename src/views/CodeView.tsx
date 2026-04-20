@@ -16,6 +16,7 @@ import Composer from '@/components/chat/Composer';
 import ToolActivityPanel from '@/components/chat/ToolActivityPanel';
 import FileTree from '@/components/code/FileTree';
 import Terminal from '@/components/code/Terminal';
+import TodoPanel from '@/components/code/TodoPanel';
 import { useStreamedChat } from '@/hooks/useStreamedChat';
 import { cn } from '@/lib/utils';
 import { isTauri, pickFolder } from '@/lib/tauri';
@@ -26,8 +27,9 @@ const CODE_BASE_PROMPT_WITH_WORKSPACE = `你是 Flaude 的 Code Agent，对标 C
 - 回答时用简洁的技术风格。
 - 引用代码时用 \`file:line\` 格式。
 - 不确定时不要乱改，先问用户。
-- 可用工具包括：fs_list_dir / fs_read_file / fs_stat（只读），fs_write_file / shell_exec（需用户授权），以及 current_time / calculator / web_fetch / create_artifact 和 MCP 远程工具。
-- 写入或执行命令前，必须先用只读工具确认目标；破坏性操作前简述计划并等用户确认。`;
+- 可用工具包括：fs_list_dir / fs_read_file / fs_stat（只读），fs_write_file / shell_exec（需用户授权），以及 current_time / calculator / web_fetch / create_artifact / todo_write 和 MCP 远程工具。
+- 写入或执行命令前，必须先用只读工具确认目标；破坏性操作前简述计划并等用户确认。
+- 多步任务（3 步及以上）先用 todo_write 列出计划给用户看，每完成一项更新状态；任务完成后用空数组清空列表。单步/琐碎任务不用 todo_write。`;
 
 // Fallback prompt when no workspace is set. File-system and shell tools will
 // throw "未设置工作区" on first call, which wastes a round trip — so we tell
@@ -115,26 +117,13 @@ export default function CodeView() {
   const openWorkspace = async () => {
     if (!isTauri()) {
       alert(
-        '网页版无法访问你的本地文件。\n请点击顶部的「下载桌面版」按钮安装客户端，解锁读/写本地文件、运行本地命令等 Code 模式完整能力。'
+        'Flaude 当前运行在浏览器中，只能用 MCP 工具。\n要操作本地文件请用 `pnpm tauri dev` 启动桌面版。'
       );
       return;
     }
     try {
       const picked = await pickFolder('选择工作区');
-      if (!picked) return; // user cancelled the dialog
-      // Re-picking the same folder is a no-op — no state change, no new conv.
-      // Without this guard a user who clicked "更换工作区" and then re-selected
-      // their current workspace would lose their scroll position + open tabs.
-      if (picked === workspacePath) return;
-      setWorkspacePath(picked);
-      // Previous conversation's tool calls all referenced the OLD workspace
-      // (`fs_read_file src/foo.ts` against a different root is meaningless),
-      // and the system prompt's workspace-path hint is now stale. Fork to a
-      // fresh conv so the agent starts cold with the new root. The old one
-      // isn't deleted — it stays in the sidebar so the user can click back.
-      // Preserve the project association if the current conv had one.
-      const newId = newConversation('code', conversation?.projectId);
-      navigate(`/code/${newId}`);
+      if (picked) setWorkspacePath(picked);
     } catch (e) {
       alert((e as Error).message);
     }
@@ -193,7 +182,7 @@ export default function CodeView() {
               <div className="mt-1 opacity-70">
                 {isTauri()
                   ? '选择一个文件夹让 Flaude 读/写文件'
-                  : '网页版不支持本地文件操作；请下载桌面版客户端'}
+                  : '浏览器模式不可用；请用 pnpm tauri:dev 启动桌面版'}
               </div>
             </button>
           )}
@@ -228,6 +217,13 @@ export default function CodeView() {
           the right-side panel. */}
       <div className="flex-1 flex flex-col min-h-0 min-w-0">
         <div className="flex-1 flex flex-col min-h-0 min-w-0">
+          {/*
+            Agent-maintained TODO list. Sits above the message list so the
+            user can always see the plan without scrolling. The panel self-
+            hides when the list is empty, so there's no visible cost when
+            the model isn't using `todo_write`.
+          */}
+          <TodoPanel conversationId={conversation.id} />
           <MessageList
             messages={conversation.messages}
             conversationId={conversation.id}
