@@ -5,23 +5,51 @@
  * Tauri native side — so we make the "upgrade to desktop" path obvious
  * without nagging desktop users (who never see this button).
  *
- * Click: opens the GitHub Releases "latest" page in a new tab — we don't
- * deep-link to the .exe because the filename embeds the version. GitHub's
- * redirect is reliable. Hover: native `title` tooltip explains *why* the
- * user would want the desktop version. Stays consistent with the other
- * TopBar buttons, which all use `title` rather than a custom popover.
+ * On mount we probe GitHub's releases API for the latest MSI asset and
+ * point the button straight at it, so one click triggers the download.
+ * The initial href is the generic /releases/latest page — used as the
+ * fallback if the API call fails (offline, rate limit, network block) so
+ * the button never dead-ends. Hover: native `title` tooltip explains *why*
+ * the user would want the desktop version.
  */
 
+import { useEffect, useState } from 'react';
 import { Download } from 'lucide-react';
 import { isTauri } from '@/lib/tauri';
 
 const RELEASES_URL = 'https://github.com/John20120530/Flaude/releases/latest';
+const LATEST_API = 'https://api.github.com/repos/John20120530/Flaude/releases/latest';
+
+interface Asset {
+  name: string;
+  browser_download_url: string;
+}
 
 export default function DownloadDesktopButton() {
+  const [href, setHref] = useState<string>(RELEASES_URL);
+
+  useEffect(() => {
+    if (isTauri()) return;
+    let cancelled = false;
+    fetch(LATEST_API, { headers: { Accept: 'application/vnd.github+json' } })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { assets?: Asset[] } | null) => {
+        if (cancelled || !data?.assets) return;
+        const msi = data.assets.find((a) => a.name.endsWith('.msi'));
+        if (msi) setHref(msi.browser_download_url);
+      })
+      .catch(() => {
+        /* keep fallback */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   if (isTauri()) return null;
   return (
     <a
-      href={RELEASES_URL}
+      href={href}
       target="_blank"
       rel="noopener noreferrer"
       className="btn-ghost flex items-center gap-1.5 text-xs px-2"
