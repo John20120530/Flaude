@@ -8,6 +8,13 @@ compatibility_date = "2025-04-01"
 # nodejs_compat gives us Buffer + process, which bcryptjs leans on.
 compatibility_flags = ["nodejs_compat"]
 
+# Keep the *.workers.dev URL alive alongside api.flaude.net. Binding a custom
+# domain with `custom_domain = true` silently disables workers.dev by default,
+# which would break v0.1.x desktop clients that have the workers.dev URL baked
+# into their bundle. Flip this back on so old installs keep working while we
+# migrate the web bundle over to api.flaude.net.
+workers_dev = true
+
 # -----------------------------------------------------------------------------
 # D1 binding.
 # First-time setup:
@@ -37,6 +44,15 @@ MONTHLY_QUOTA_TOKENS = "300000"
 APP_ENV = "production"
 JWT_ISSUER = "flaude"
 MONTHLY_QUOTA_TOKENS = "300000"
+
+# Custom domain binding — ties the Worker to api.flaude.net. `custom_domain`
+# makes Cloudflare manage the DNS/SSL automatically (creates the proxied
+# record on the flaude.net zone), so we don't hand-maintain a CNAME.
+# Lives at the top level (not under [env.production]) because `pnpm run deploy`
+# uses the default environment — env-scoped routes would be ignored.
+[[routes]]
+pattern = "api.flaude.net"
+custom_domain = true
 
 # Local-dev bindings (cookies without HTTPS, verbose logging, etc.) are
 # handled by APP_ENV=development above — no separate [env.development] block

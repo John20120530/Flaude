@@ -23,6 +23,21 @@ export interface ToolCall {
   error?: string;
 }
 
+/**
+ * An entry in the Code agent's self-maintained task list. The agent calls
+ * the built-in `todo_write` tool to publish a new snapshot of its task
+ * breakdown, and that snapshot is rendered as a checklist in the
+ * conversation. The shape intentionally mirrors Claude Code's TodoWrite
+ * tool so prompt guidance that assumes that schema works unchanged.
+ */
+export interface AgentTodo {
+  /** Imperative description: "Run tests", "Wire the bridge". */
+  content: string;
+  /** Present continuous form shown while in progress: "Running tests". */
+  activeForm: string;
+  status: 'pending' | 'in_progress' | 'completed';
+}
+
 export interface Message {
   id: string;
   role: MessageRole;

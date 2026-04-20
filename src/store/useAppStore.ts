@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type {
+  AgentTodo,
   Attachment,
   Conversation,
   MCPServer,
@@ -82,6 +83,27 @@ export interface ConflictRecord {
 /** 1 hour. After this, conflict records auto-expire. */
 export const CONFLICT_TTL_MS = 60 * 60 * 1000;
 
+/**
+ * A pending `fs_write_file` call, paused at the approval modal. See
+ * AppState.pendingWrites for lifecycle + persistence notes.
+ */
+export interface PendingWrite {
+  /** Unique id; used to match the Apply/Reject click back to the correct promise. */
+  id: string;
+  /** Path the agent wants to write (relative to workspace or absolute inside it). */
+  path: string;
+  /** Current file contents, or '' if the file doesn't exist yet. */
+  oldContent: string;
+  /** New contents the agent wants to write. */
+  newContent: string;
+  /** True if the file didn't exist — the modal shows "create file" framing. */
+  isNewFile: boolean;
+  /** Whether the agent requested create_dirs=true. Passed through on approve. */
+  createDirs: boolean;
+  /** unix ms when the agent requested this write. Used if we later show a timer. */
+  submittedAt: number;
+}
+
 interface AppState {
   // UI state
   theme: Theme;
@@ -114,9 +136,42 @@ interface AppState {
   workspacePath: string | null;
   /** Explicit opt-in: without this, fs_write and shell_exec stay off even
    *  though the model sees the tools. Protects against accidental writes
-   *  on a fresh install. */
+   *  on a fresh install.
+   *
+   *  Semantics (after the diff-preview landing): when true, every
+   *  `fs_write_file` call still pops a per-call approval modal showing a
+   *  diff against the current file contents. The model must wait for
+   *  Apply/Reject before its tool call resolves. Flipping this to false
+   *  rejects all writes outright (the original behaviour). There is no
+   *  "trust everything silently" mode — we decided the safety win from
+   *  always-preview is worth the extra click. If it becomes annoying in
+   *  practice we'll add a second opt-in (e.g. `trustFileWrites`) but
+   *  YAGNI for now. */
   allowFileWrites: boolean;
   allowShellExec: boolean;
+  /**
+   * Pending `fs_write_file` approvals. Each entry represents a paused
+   * tool call waiting for the user to click Apply or Reject in the
+   * WriteApprovalModal. FIFO — the modal processes `pendingWrites[0]`,
+   * the rest queue. Transient (not persisted): if the app is force-killed
+   * during an approval, the tool call is lost, which is the safe default.
+   *
+   * The promise-resolver for each entry lives in a module-level Map in
+   * `src/lib/writeApproval.ts` — we can't persist callbacks, and we
+   * don't want the store to know how to resolve things itself. See that
+   * file for the bridge.
+   */
+  pendingWrites: PendingWrite[];
+
+  /**
+   * Per-conversation agent todo lists, keyed by conversation id. Populated
+   * by the built-in `todo_write` tool so the Code agent can publish its
+   * task breakdown. Not persisted: task lists are ephemeral session state,
+   * the conversation history preserves the tool-call snapshots we actually
+   * render. Rehydrating a stale list after app restart would surface
+   * misleading "in_progress" items with no agent to drive them.
+   */
+  agentTodos: Record<string, AgentTodo[]>;
 
   // M4: Memory + Skills
   /**
@@ -262,6 +317,13 @@ interface AppState {
   setWorkspacePath: (path: string | null) => void;
   setAllowFileWrites: (v: boolean) => void;
   setAllowShellExec: (v: boolean) => void;
+  /** Append a pending write approval. Called from writeApproval.ts. */
+  enqueuePendingWrite: (pw: PendingWrite) => void;
+  /** Drop the resolved approval from the queue. Called from writeApproval.ts
+   *  after the user clicks Apply or Reject. */
+  removePendingWrite: (id: string) => void;
+  /** Replace the agent's task list for a conversation. Called by `todo_write`. */
+  setAgentTodos: (conversationId: string, todos: AgentTodo[]) => void;
 
   // M4: Memory + Skills
   setGlobalMemory: (text: string) => void;
@@ -357,6 +419,8 @@ export const useAppStore = create<AppState>()(
       workspacePath: null,
       allowFileWrites: false,
       allowShellExec: false,
+      pendingWrites: [],
+      agentTodos: {},
 
       globalMemory: '',
       skills: [...BUILTIN_SKILLS],
@@ -430,6 +494,11 @@ export const useAppStore = create<AppState>()(
             // certainly been pushed at some point. Not perfect but avoids
             // keeping a "was this ever on the server" bit on every row.
             (s.conversations.find((c) => c.id === id)?.messages.length ?? 0) > 0;
+          // Drop any per-conversation agent todos so the map doesn't accumulate
+          // stale entries for deleted convs. (agentTodos isn't persisted, but
+          // it still matters for long-running sessions with a lot of churn.)
+          const nextTodos = { ...s.agentTodos };
+          delete nextTodos[id];
           return {
             conversations: s.conversations.filter((c) => c.id !== id),
             activeConversationId:
@@ -438,6 +507,7 @@ export const useAppStore = create<AppState>()(
             pendingDeletions: wasSynced
               ? [...s.pendingDeletions, id]
               : s.pendingDeletions,
+            agentTodos: nextTodos,
           };
         }),
       clearConversation: (id) =>
@@ -906,6 +976,25 @@ export const useAppStore = create<AppState>()(
       setWorkspacePath: (path) => set({ workspacePath: path }),
       setAllowFileWrites: (v) => set({ allowFileWrites: v }),
       setAllowShellExec: (v) => set({ allowShellExec: v }),
+      enqueuePendingWrite: (pw) =>
+        set((s) => ({ pendingWrites: [...s.pendingWrites, pw] })),
+      removePendingWrite: (id) =>
+        set((s) => ({
+          pendingWrites: s.pendingWrites.filter((p) => p.id !== id),
+        })),
+      setAgentTodos: (conversationId, todos) =>
+        set((s) => {
+          // Empty list is how the agent says "plan cleared" — keep the key
+          // present so subscribers see the transition, but don't inflate the
+          // map with stale entries for deleted conversations either.
+          const next = { ...s.agentTodos };
+          if (todos.length === 0) {
+            delete next[conversationId];
+          } else {
+            next[conversationId] = todos;
+          }
+          return { agentTodos: next };
+        }),
 
       // M4: Memory + Skills
       setGlobalMemory: (text) => set({ globalMemory: text }),

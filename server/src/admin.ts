@@ -35,8 +35,15 @@ import { currentPeriodBounds } from './usage';
 const admin = new Hono<AppContext>();
 
 // Order matters: requireAuth populates c.get('userRole'); requireAdmin reads it.
-admin.use('*', requireAuth);
-admin.use('*', requireAdmin);
+//
+// IMPORTANT: scope to '/admin/*' rather than '*'. This sub-app is mounted on
+// the main app at '/' (see index.ts: `app.route('/', admin)`), and Hono's
+// `use('*')` matches every request path under the mount — meaning `*` at
+// this level would apply requireAdmin to /sync/pull, /v1/chat/completions,
+// everything. That locked non-admin users out of all routes. Path-scoping
+// keeps the middleware where it belongs.
+admin.use('/admin/*', requireAuth);
+admin.use('/admin/*', requireAdmin);
 
 // -----------------------------------------------------------------------------
 // GET /admin/users

@@ -16,7 +16,7 @@
  *   - Self-row has the destructive controls (disable, role change) hidden,
  *     matching the server's 400-guard. Belt + suspenders.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   UserPlus,
   Loader2,
@@ -43,6 +43,15 @@ import {
 import { useAppStore } from '@/store/useAppStore';
 import { cn } from '@/lib/utils';
 
+/**
+ * How often the view silently refetches in the background. 30 s is the
+ * sweet spot: usage counters on D1 update in near-real-time after a chat
+ * completion, so 30 s catches new activity within "I just noticed" latency
+ * without pounding the /admin/users endpoint. Raise if the server wakes up
+ * from cold start and each fetch hurts.
+ */
+const REFRESH_INTERVAL_MS = 30_000;
+
 export default function AdminView() {
   const selfId = useAppStore((s) => s.auth?.user.id);
 
@@ -50,6 +59,8 @@ export default function AdminView() {
   const [envDefaultQuota, setEnvDefaultQuota] = useState<number>(300_000);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Unix ms of the last successful fetch — shown as "更新于 N 秒前". */
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<number | null>(null);
 
   // Modals — single-instance, keyed by { kind, user? }. Keeps state local;
   // we re-fetch the list after each mutation instead of patching in place
@@ -61,6 +72,19 @@ export default function AdminView() {
     | null
   >(null);
 
+  // Tick every 5 s purely to re-render the "更新于 N 秒前" label with a
+  // current relative value. Cheaper than subscribing to requestAnimationFrame
+  // and accurate enough — the label's units are "秒/分钟", not milliseconds.
+  const [nowTick, setNowTick] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(Date.now()), 5_000);
+    return () => clearInterval(t);
+  }, []);
+  const refreshedLabel = useMemo(
+    () => (lastRefreshedAt === null ? null : formatRelativeTime(nowTick - lastRefreshedAt)),
+    [lastRefreshedAt, nowTick],
+  );
+
   // Toast-ish banner for post-mutation success flashes.
   const [flash, setFlash] = useState<string | null>(null);
   useEffect(() => {
@@ -69,25 +93,65 @@ export default function AdminView() {
     return () => clearTimeout(t);
   }, [flash]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await adminListUsers();
-      setUsers(res.users);
-      setEnvDefaultQuota(res.env_default_quota);
-    } catch (err) {
-      setError(
-        err instanceof FlaudeApiError ? err.message : (err as Error).message,
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  /**
+   * Fetch the user list. `silent: true` skips the loading spinner and
+   * swallows errors — used by the 30 s auto-poll so it doesn't flash the
+   * refresh button every half-minute. A flapping backend won't wipe the
+   * current table; the next manual refresh will surface the real failure.
+   */
+  const load = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      const silent = !!opts?.silent;
+      if (!silent) setLoading(true);
+      if (!silent) setError(null);
+      try {
+        const res = await adminListUsers();
+        setUsers(res.users);
+        setEnvDefaultQuota(res.env_default_quota);
+        setLastRefreshedAt(Date.now());
+      } catch (err) {
+        if (!silent) {
+          setError(
+            err instanceof FlaudeApiError ? err.message : (err as Error).message,
+          );
+        }
+      } finally {
+        if (!silent) setLoading(false);
+      }
+    },
+    [],
+  );
 
+  // Initial load on mount + whenever the callback changes (stable, so this
+  // fires exactly once — but writing the dep honestly keeps lint happy).
   useEffect(() => {
     load();
   }, [load]);
+
+  // Auto-refresh every 30 s so an admin leaving the page open sees fresh
+  // usage numbers without remounting. Two guards keep the polling polite:
+  //   - skip while a modal (quota edit / password reset / new user) is open,
+  //     otherwise the silent re-render races inline editing state;
+  //   - skip when the tab is hidden — no point hammering the server for a
+  //     view nobody is looking at, and document.visibilityState flips drive
+  //     a one-shot refresh on return so data is fresh the instant the user
+  //     comes back.
+  useEffect(() => {
+    if (modal) return;
+    const poll = () => {
+      if (document.visibilityState !== 'visible') return;
+      void load({ silent: true });
+    };
+    const timer = setInterval(poll, REFRESH_INTERVAL_MS);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void load({ silent: true });
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [load, modal]);
 
   const toggleDisabled = async (user: AdminUser) => {
     const targetState = !user.disabled;
@@ -96,7 +160,7 @@ export default function AdminView() {
     try {
       await adminUpdateUser(user.id, { disabled: !!targetState });
       setFlash(`已${verb}「${user.display_name}」`);
-      load();
+      void load();
     } catch (err) {
       alert(err instanceof FlaudeApiError ? err.message : (err as Error).message);
     }
@@ -109,7 +173,7 @@ export default function AdminView() {
     try {
       await adminUpdateUser(user.id, { role: targetRole });
       setFlash(`已${verb}「${user.display_name}」`);
-      load();
+      void load();
     } catch (err) {
       alert(err instanceof FlaudeApiError ? err.message : (err as Error).message);
     }
@@ -129,11 +193,19 @@ export default function AdminView() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {refreshedLabel && (
+              <span
+                className="text-xs text-claude-muted dark:text-night-muted"
+                title={new Date(lastRefreshedAt ?? 0).toLocaleString('zh-CN')}
+              >
+                更新于 {refreshedLabel}
+              </span>
+            )}
             <button
-              onClick={load}
+              onClick={() => load()}
               disabled={loading}
               className="btn-ghost text-sm"
-              title="刷新"
+              title="刷新（每 30 秒后台自动刷新）"
             >
               <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} />
               刷新
@@ -207,7 +279,7 @@ export default function AdminView() {
           onCreated={(display_name) => {
             setFlash(`已创建「${display_name}」`);
             setModal(null);
-            load();
+            void load();
           }}
           envDefaultQuota={envDefaultQuota}
         />
@@ -220,7 +292,7 @@ export default function AdminView() {
           onSaved={() => {
             setFlash(`已更新「${modal.user.display_name}」的配额`);
             setModal(null);
-            load();
+            void load();
           }}
         />
       )}
@@ -815,15 +887,27 @@ function ModalShell({
   children: React.ReactNode;
   onClose: () => void;
 }) {
+  // Track whether the mousedown that started this click landed on the
+  // backdrop itself. Without this, selecting text inside an input and
+  // releasing the mouse outside the card dispatches a `click` whose target
+  // is the backdrop — silently dismissing the modal and wiping half-filled
+  // forms ("新建用户" card 闪退). Close only when both press and release
+  // happened on the backdrop.
+  const mouseDownOnBackdrop = useRef(false);
   return (
     <div
       className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
-      onClick={onClose}
+      onMouseDown={(e) => {
+        mouseDownOnBackdrop.current = e.target === e.currentTarget;
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && mouseDownOnBackdrop.current) {
+          onClose();
+        }
+        mouseDownOnBackdrop.current = false;
+      }}
     >
-      <div
-        className="w-full max-w-md rounded-2xl bg-white dark:bg-night-bg border border-claude-border dark:border-night-border shadow-xl p-5"
-        onClick={(e) => e.stopPropagation()}
-      >
+      <div className="w-full max-w-md rounded-2xl bg-white dark:bg-night-bg border border-claude-border dark:border-night-border shadow-xl p-5">
         <div className="flex items-start justify-between mb-3">
           <h3 className="text-lg font-semibold">{title}</h3>
           <button onClick={onClose} className="btn-ghost p-1" aria-label="关闭">
@@ -857,4 +941,21 @@ function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
+}
+
+/**
+ * Humanise an elapsed duration for the "更新于 X 前" label. Units stop at
+ * hours — if the view has been open longer than a day without a refresh
+ * something has gone spectacularly wrong and we'd rather render absolute
+ * timestamp via the `title` attribute in that case.
+ */
+export function formatRelativeTime(elapsedMs: number): string {
+  const s = Math.max(0, Math.floor(elapsedMs / 1000));
+  if (s < 10) return '刚刚';
+  if (s < 60) return `${s} 秒前`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} 分钟前`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} 小时前`;
+  return `${Math.floor(h / 24)} 天前`;
 }

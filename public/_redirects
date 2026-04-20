@@ -1,0 +1,4 @@
+# Cloudflare Pages SPA fallback — any path that doesn't match a static file
+# hands back index.html with a 200 so React Router can handle the route.
+# Without this, a hard-reload on /chat/abc123 would 404.
+/*    /index.html   200

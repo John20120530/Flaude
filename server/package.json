@@ -15,7 +15,9 @@
     "db:migrate:artifacts": "wrangler d1 execute flaude --local --file=./migrations/003_artifacts.sql",
     "db:migrate:artifacts:remote": "wrangler d1 execute flaude --remote --file=./migrations/003_artifacts.sql",
     "db:shell": "wrangler d1 execute flaude --local --command",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -24,7 +26,10 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241218.0",
     "@types/bcryptjs": "^2.4.6",
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^12.9.0",
     "typescript": "^5.4.5",
+    "vitest": "2.1.9",
     "wrangler": "^3.99.0"
   }
 }

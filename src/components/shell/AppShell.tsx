@@ -4,6 +4,8 @@ import Sidebar from './Sidebar';
 import TopBar from './TopBar';
 import ArtifactsPanel from './ArtifactsPanel';
 import ConflictToasts from './ConflictToasts';
+import UpdateBanner from './UpdateBanner';
+import WriteApprovalModal from '@/components/code/WriteApprovalModal';
 import { cn } from '@/lib/utils';
 
 export default function AppShell() {
@@ -92,6 +94,19 @@ export default function AppShell() {
         level so it's visible across all routes.
       */}
       <ConflictToasts />
+      {/*
+        fs_write_file approval modal. Also fixed-positioned; also
+        intentionally at shell scope so a Code-mode agent's write
+        request surfaces no matter which view the user is on. When the
+        pendingWrites queue is empty the component renders null, so the
+        cost of "always mounted" is effectively zero.
+      */}
+      <WriteApprovalModal />
+      {/*
+        Desktop-only auto-update banner. Self-guards on isTauri() and on a
+        null manifest, so it's free to leave mounted everywhere.
+      */}
+      <UpdateBanner />
     </div>
   );
 }

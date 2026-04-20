@@ -20,8 +20,16 @@ interface Options {
 /**
  * Max number of tool round-trips per user turn. After this many recursions
  * we stop and append a warning so the model doesn't spiral.
+ *
+ * Why 30: Claude Code's default is in the 25–50 range, and real agentic
+ * tasks (read file → edit → run tests → fix → re-run) routinely chew
+ * through 15–20. The old cap of 8 bit on moderate tasks — the model would
+ * get halfway through a refactor and hit the wall. 30 leaves headroom
+ * without letting a broken model burn infinite tokens. If a user wants
+ * further control we'll add a setting; bumping the constant buys us the
+ * common case for free.
  */
-const MAX_TOOL_ROUNDTRIPS = 8;
+const MAX_TOOL_ROUNDTRIPS = 30;
 
 /**
  * When automatically deciding to summarize before a send, use at most this

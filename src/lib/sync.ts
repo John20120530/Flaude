@@ -120,8 +120,13 @@ function clearPushRetry(): void {
 // -----------------------------------------------------------------------------
 // Client-local → wire shape conversion. Kept in this file (not in the store)
 // because it's network-layer concern: the store never touches SyncConversation.
+//
+// Exported so `lib/accountExport.ts` can build a round-trip-compatible JSON
+// bundle using the same schema the /sync/pull/push endpoints speak — that way
+// a future "import backup" path can feed the bundle into applyPulled* without
+// a second, bespoke schema.
 // -----------------------------------------------------------------------------
-function toWireMessage(m: Message): SyncMessage {
+export function toWireMessage(m: Message): SyncMessage {
   // attachments and toolCalls go into metadata_json on the server. We strip
   // any `data:` base64 blobs from attachments before sending — they're too
   // big for the wire and the UI already discards them in partialize().
@@ -151,7 +156,7 @@ function toWireMessage(m: Message): SyncMessage {
   };
 }
 
-function toWireProject(p: Project): SyncProject {
+export function toWireProject(p: Project): SyncProject {
   return {
     id: p.id,
     name: p.name,
@@ -167,7 +172,7 @@ function toWireProject(p: Project): SyncProject {
   };
 }
 
-function toWireArtifact(a: Artifact): SyncArtifact {
+export function toWireArtifact(a: Artifact): SyncArtifact {
   return {
     id: a.id,
     messageId: a.messageId ?? null,
@@ -186,7 +191,7 @@ function toWireArtifact(a: Artifact): SyncArtifact {
   };
 }
 
-function toWireConversation(c: Conversation): SyncConversation {
+export function toWireConversation(c: Conversation): SyncConversation {
   return {
     id: c.id,
     title: c.title,
