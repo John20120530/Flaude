@@ -43,6 +43,9 @@
     ],
     "createUpdaterArtifacts": true,
     "windows": {
+      "wix": {
+        "language": "zh-CN"
+      },
       "nsis": {
         "installMode": "currentUser",
         "installerIcon": "icons/icon.ico",

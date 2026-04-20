@@ -16,7 +16,7 @@
  *   - Self-row has the destructive controls (disable, role change) hidden,
  *     matching the server's 400-guard. Belt + suspenders.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   UserPlus,
   Loader2,
@@ -887,15 +887,27 @@ function ModalShell({
   children: React.ReactNode;
   onClose: () => void;
 }) {
+  // Track whether the mousedown that started this click landed on the
+  // backdrop itself. Without this, selecting text inside an input and
+  // releasing the mouse outside the card dispatches a `click` whose target
+  // is the backdrop — silently dismissing the modal and wiping half-filled
+  // forms ("新建用户" card 闪退). Close only when both press and release
+  // happened on the backdrop.
+  const mouseDownOnBackdrop = useRef(false);
   return (
     <div
       className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
-      onClick={onClose}
+      onMouseDown={(e) => {
+        mouseDownOnBackdrop.current = e.target === e.currentTarget;
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && mouseDownOnBackdrop.current) {
+          onClose();
+        }
+        mouseDownOnBackdrop.current = false;
+      }}
     >
-      <div
-        className="w-full max-w-md rounded-2xl bg-white dark:bg-night-bg border border-claude-border dark:border-night-border shadow-xl p-5"
-        onClick={(e) => e.stopPropagation()}
-      >
+      <div className="w-full max-w-md rounded-2xl bg-white dark:bg-night-bg border border-claude-border dark:border-night-border shadow-xl p-5">
         <div className="flex items-start justify-between mb-3">
           <h3 className="text-lg font-semibold">{title}</h3>
           <button onClick={onClose} className="btn-ghost p-1" aria-label="关闭">
