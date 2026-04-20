@@ -152,7 +152,7 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = [
 
 /** Default model picks per mode — used when user has not overridden. */
 export const DEFAULT_MODEL_BY_MODE: Record<'chat' | 'code', string> = {
-  chat: 'qwen-plus',
+  chat: 'deepseek-chat',
   code: 'deepseek-chat',
 };
 
