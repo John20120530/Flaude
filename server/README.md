@@ -84,14 +84,13 @@ curl http://localhost:8787/auth/me -H "Authorization: Bearer $TOKEN"
 
 ## Deploy
 
+See [DEPLOY.md](DEPLOY.md) for the full from-zero walk-through (Cloudflare
+account, D1 setup, secrets, first admin, client configuration, smoke test,
+troubleshooting). The three-command summary:
+
 ```bash
-# Push secrets (once per secret per env):
-pnpm wrangler secret put JWT_SECRET
-
-# Apply schema to the remote D1 (destructive-safe — schema.sql is all IF NOT EXISTS):
-pnpm db:init:remote
-
-# Ship:
+pnpm wrangler secret put JWT_SECRET   # plus provider keys — see DEPLOY.md
+pnpm db:init:remote                   # schema is idempotent, safe to re-run
 pnpm deploy
 ```
 
