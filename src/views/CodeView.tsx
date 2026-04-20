@@ -115,7 +115,7 @@ export default function CodeView() {
   const openWorkspace = async () => {
     if (!isTauri()) {
       alert(
-        'Flaude 当前运行在浏览器中，只能用 MCP 工具。\n要操作本地文件请用 `pnpm tauri dev` 启动桌面版。'
+        '网页版无法访问你的本地文件。\n请点击顶部的「下载桌面版」按钮安装客户端，解锁读/写本地文件、运行本地命令等 Code 模式完整能力。'
       );
       return;
     }
@@ -193,7 +193,7 @@ export default function CodeView() {
               <div className="mt-1 opacity-70">
                 {isTauri()
                   ? '选择一个文件夹让 Flaude 读/写文件'
-                  : '浏览器模式不可用；请用 pnpm tauri:dev 启动桌面版'}
+                  : '网页版不支持本地文件操作；请下载桌面版客户端'}
               </div>
             </button>
           )}

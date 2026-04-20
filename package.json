@@ -15,7 +15,8 @@
     "test:watch": "vitest",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "deploy:web": "pnpm build && wrangler pages deploy dist --project-name flaude-web"
   },
   "dependencies": {
     "@tailwindcss/typography": "^0.5.19",

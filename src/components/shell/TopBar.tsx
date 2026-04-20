@@ -10,6 +10,7 @@ import { useAppStore } from '@/store/useAppStore';
 import { cn } from '@/lib/utils';
 import { useParams } from 'react-router-dom';
 import { useMemo } from 'react';
+import DownloadDesktopButton from './DownloadDesktopButton';
 
 export default function TopBar() {
   const { conversationId } = useParams();
@@ -75,6 +76,7 @@ export default function TopBar() {
 
       {/* Model picker */}
       <div className="ml-auto flex items-center gap-2">
+        <DownloadDesktopButton />
         <div className="relative">
           <select
             value={currentModelId}
