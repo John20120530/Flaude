@@ -73,6 +73,11 @@ jobs:
           # Updater signing — see comment block at the top of this file.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Baked into the frontend bundle at Vite build time so the installed
+          # client knows which Cloudflare Worker to talk to without the user
+          # having to configure it. Missing secret → app falls back to
+          # localhost:8787, which is only useful for local dev.
+          VITE_FLAUDE_SERVER_URL: ${{ secrets.VITE_FLAUDE_SERVER_URL }}
         run: pnpm tauri:build
 
       # The bundler emits files with names like
