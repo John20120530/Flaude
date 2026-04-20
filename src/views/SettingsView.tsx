@@ -21,6 +21,8 @@ import {
   LogOut,
   Gauge,
   RefreshCw,
+  Download,
+  Database,
 } from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
 import { cn } from '@/lib/utils';
@@ -35,6 +37,10 @@ import {
   logout as apiLogout,
   type UsageSnapshot,
 } from '@/lib/flaudeApi';
+import {
+  countBundleContents,
+  exportAccountBundle,
+} from '@/lib/accountExport';
 
 export default function SettingsView() {
   const providers = useAppStore((s) => s.providers);
@@ -90,6 +96,7 @@ export default function SettingsView() {
 
         <DesktopSection />
         <MemorySection />
+        <DataSection />
         <SkillsSection />
         <MCPSection />
         <SlashSection />
@@ -408,6 +415,121 @@ function DesktopSection() {
         </label>
       </div>
     </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Data management — full-account export (backup).
+//
+// One button that downloads a JSON bundle of everything the user cares
+// about: conversations, projects, artifacts, skills, slash commands, MCP
+// setup, global memory, and UI preferences. Format matches /sync/pull so a
+// future import path can round-trip without a second schema.
+//
+// We don't block on success — the download either kicks off (browser /
+// Tauri save dialog) or throws, and we surface the latter inline. No
+// long-running state because even thousands of conversations serialize
+// in well under a second.
+// ---------------------------------------------------------------------------
+
+function DataSection() {
+  const [busy, setBusy] = useState(false);
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Reading the store on every render is cheap — Zustand hooks short-circuit
+  // when the selected slice didn't change. We select the specific counters
+  // rather than calling countBundleContents() because that would force a
+  // re-render on any unrelated store write.
+  const conversations = useAppStore((s) => s.conversations);
+  const projects = useAppStore((s) => s.projects);
+  const artifacts = useAppStore((s) => s.artifacts);
+  const skills = useAppStore((s) => s.skills);
+  const counts = useMemo(() => countBundleContents(), [
+    conversations,
+    projects,
+    artifacts,
+    skills,
+  ]);
+
+  const onExport = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const saved = await exportAccountBundle({
+        flaudeVersion: '0.1.0',
+      });
+      // Tauri: `saved` is the path the user picked; browser: the filename;
+      // null means the user cancelled the native save dialog.
+      if (saved !== null) {
+        setLastSavedAt(Date.now());
+      }
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section>
+      <h2 className="text-lg font-semibold mb-1 flex items-center gap-2">
+        <Database className="w-4 h-4" />
+        数据管理
+      </h2>
+      <p className="text-xs text-claude-muted dark:text-night-muted mb-3">
+        一键备份你的全部数据（会话、项目、工件、技能、设置）。文件格式与服务端同步的 payload 对齐，
+        方便未来导入恢复。不含登录态、工作区路径和桌面权限开关——这些是按设备单独配置的。
+      </p>
+
+      <div className="p-3 rounded-xl border border-claude-border dark:border-night-border space-y-3">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+          <Stat label="会话" value={counts.conversations} />
+          <Stat label="消息" value={counts.messages} />
+          <Stat label="项目" value={counts.projects} />
+          <Stat label="工件" value={counts.artifacts} />
+          <Stat label="技能" value={counts.skills} />
+          <Stat label="斜杠命令" value={counts.slashCommands} />
+          <Stat label="MCP 服务器" value={counts.mcpServers} />
+        </div>
+
+        <div className="flex items-center gap-3">
+          <button
+            onClick={onExport}
+            disabled={busy}
+            className="btn-primary flex items-center gap-2 text-sm disabled:opacity-50"
+          >
+            {busy ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+            导出全部数据
+          </button>
+          {lastSavedAt !== null && !busy && !err && (
+            <span className="text-xs text-green-700 dark:text-green-400 flex items-center gap-1">
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              已保存
+            </span>
+          )}
+          {err && (
+            <span className="text-xs text-red-600 dark:text-red-400 flex items-center gap-1">
+              <AlertCircle className="w-3.5 h-3.5" />
+              {err}
+            </span>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="p-2 rounded-md bg-black/[0.03] dark:bg-white/[0.03]">
+      <div className="text-claude-muted dark:text-night-muted">{label}</div>
+      <div className="font-mono text-sm">{value}</div>
+    </div>
   );
 }
 
