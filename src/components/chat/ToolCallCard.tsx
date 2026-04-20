@@ -6,9 +6,11 @@ import {
   Loader2,
   Clock,
   Wrench,
+  Circle,
+  ListChecks,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import type { ToolCall } from '@/types';
+import type { AgentTodo, ToolCall } from '@/types';
 
 interface Props {
   call: ToolCall;
@@ -59,6 +61,24 @@ export default function ToolCallCard({ call, resultContent }: Props) {
 
   const argsPretty = formatArgs(call.arguments);
   const displayResult = resultContent ?? call.result ?? call.error ?? '';
+
+  // Special-case todo_write: instead of the generic "args / result" panes,
+  // render a checklist so the user can scan the agent's plan at a glance.
+  // Falls through to the normal card layout while the call is still
+  // pending (arguments haven't parsed yet) or if parsing fails.
+  if (call.name === 'todo_write' && call.status !== 'pending') {
+    const todos = extractTodos(call.arguments);
+    if (todos) {
+      return (
+        <TodoListCard
+          todos={todos}
+          status={call.status}
+          statusIcon={statusIcon}
+          statusLabel={statusLabel}
+        />
+      );
+    }
+  }
 
   return (
     <div
@@ -111,6 +131,111 @@ export default function ToolCallCard({ call, resultContent }: Props) {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Pull the todos array off a `todo_write` call's arguments. We accept both
+ * the already-parsed shape (`arguments: { todos: [...] }`) and the mid-
+ * stream `{ __raw: "..." }` we get while the model is still emitting JSON,
+ * returning null in the latter case so the caller falls back to the
+ * generic card until the parse completes.
+ */
+function extractTodos(args: Record<string, unknown> | unknown): AgentTodo[] | null {
+  if (!args || typeof args !== 'object') return null;
+  const obj = args as Record<string, unknown>;
+  if ('__raw' in obj) return null;
+  const raw = obj.todos;
+  if (!Array.isArray(raw)) return null;
+  const out: AgentTodo[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') return null;
+    const t = item as Record<string, unknown>;
+    const content = typeof t.content === 'string' ? t.content : '';
+    const activeForm = typeof t.activeForm === 'string' ? t.activeForm : content;
+    const status = t.status;
+    if (status !== 'pending' && status !== 'in_progress' && status !== 'completed') {
+      return null;
+    }
+    if (!content) return null;
+    out.push({ content, activeForm, status });
+  }
+  return out;
+}
+
+function TodoListCard({
+  todos,
+  status,
+  statusIcon,
+  statusLabel,
+}: {
+  todos: AgentTodo[];
+  status: ToolCall['status'];
+  statusIcon: React.ReactNode;
+  statusLabel: string;
+}) {
+  const done = todos.filter((t) => t.status === 'completed').length;
+  const total = todos.length;
+  return (
+    <div
+      className={cn(
+        'my-2 rounded-lg border text-sm not-prose overflow-hidden',
+        status === 'error'
+          ? 'border-red-200 dark:border-red-900/50 bg-red-50/50 dark:bg-red-950/20'
+          : 'border-claude-border dark:border-night-border bg-claude-surface/60 dark:bg-night-surface/60'
+      )}
+    >
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-claude-border/60 dark:border-night-border/60">
+        <ListChecks className="w-3.5 h-3.5 text-claude-accent shrink-0" />
+        <span className="font-mono text-xs text-claude-accent">todo_write</span>
+        <span className="text-xs text-claude-muted dark:text-night-muted">
+          {done}/{total} 已完成
+        </span>
+        <div className="ml-auto flex items-center gap-1.5 shrink-0">
+          {statusIcon}
+          <span className="text-xs text-claude-muted dark:text-night-muted">
+            {statusLabel}
+          </span>
+        </div>
+      </div>
+      {todos.length === 0 ? (
+        <div className="px-3 py-2 text-xs text-claude-muted dark:text-night-muted italic">
+          任务列表已清空
+        </div>
+      ) : (
+        <ul className="px-3 py-2 space-y-1">
+          {todos.map((t, i) => (
+            <li key={i} className="flex items-start gap-2 text-sm">
+              <TodoIcon status={t.status} />
+              <span
+                className={cn(
+                  'leading-tight',
+                  t.status === 'completed' &&
+                    'line-through text-claude-muted dark:text-night-muted',
+                  t.status === 'in_progress' && 'font-medium'
+                )}
+              >
+                {t.status === 'in_progress' ? t.activeForm : t.content}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function TodoIcon({ status }: { status: AgentTodo['status'] }) {
+  if (status === 'completed') {
+    return (
+      <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0 text-green-600" />
+    );
+  }
+  if (status === 'in_progress') {
+    return <Loader2 className="w-4 h-4 mt-0.5 shrink-0 text-blue-500 animate-spin" />;
+  }
+  return (
+    <Circle className="w-4 h-4 mt-0.5 shrink-0 text-claude-muted dark:text-night-muted" />
   );
 }
 

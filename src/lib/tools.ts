@@ -14,9 +14,10 @@
  * time a server reconnects.
  */
 
-import type { WorkMode } from '@/types';
+import type { AgentTodo, WorkMode } from '@/types';
 import type { ToolSpec } from '@/services/providerClient';
 import { FlaudeApiError, webSearch } from '@/lib/flaudeApi';
+import { useAppStore } from '@/store/useAppStore';
 
 export type ToolSource = 'builtin' | 'mcp' | 'skill';
 
@@ -373,6 +374,100 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
         return `[${i + 1}] ${r.name || '(untitled)'}${site}${when}\n    ${r.url || ''}\n    ${body}`;
       });
       return `搜索「${q}」共 ${results.length} 条，展示前 ${Math.min(n, results.length)} 条：\n\n${lines.join('\n\n')}`;
+    },
+  },
+
+  {
+    // Claude Code's "TodoWrite" dressed up for Flaude. The Code agent
+    // publishes its whole task breakdown on every call; we store it in
+    // `agentTodos[conversationId]` for UIs that want a pinned view, and we
+    // also embed the list in the tool result so ToolCallCard renders the
+    // snapshot inline in-conversation (mirrors Claude Code's transcript
+    // affordance exactly).
+    //
+    // Why expose this as a tool rather than, say, <todo> tags? Tools are
+    // structured JSON the agent is already trained to produce reliably;
+    // tags would leak into prose and regress with every model swap.
+    name: 'todo_write',
+    description:
+      'Publish or update your task list for this conversation. Call this when ' +
+      'starting a non-trivial task (3+ steps) to plan, and again each time a ' +
+      'step completes or a new one is discovered. Always pass the FULL list — ' +
+      'this replaces the previous snapshot entirely. Mark exactly one task as ' +
+      'in_progress at a time. Include both an imperative `content` and a ' +
+      'present-continuous `activeForm` per item.',
+    parameters: {
+      type: 'object',
+      properties: {
+        todos: {
+          type: 'array',
+          description: 'The complete current task list. Empty array clears it.',
+          items: {
+            type: 'object',
+            properties: {
+              content: {
+                type: 'string',
+                description: 'Imperative description, e.g. "Run tests".',
+              },
+              activeForm: {
+                type: 'string',
+                description: 'Present-continuous, e.g. "Running tests".',
+              },
+              status: {
+                type: 'string',
+                enum: ['pending', 'in_progress', 'completed'],
+              },
+            },
+            required: ['content', 'activeForm', 'status'],
+          },
+        },
+      },
+      required: ['todos'],
+    },
+    source: 'builtin',
+    modes: ['code'],
+    handler: async ({ todos }, { conversationId }) => {
+      if (!Array.isArray(todos)) {
+        throw new Error('todos 必须是数组');
+      }
+      const normalized: AgentTodo[] = [];
+      for (let i = 0; i < todos.length; i++) {
+        const raw = todos[i] as Record<string, unknown>;
+        if (!raw || typeof raw !== 'object') {
+          throw new Error(`todos[${i}] 不是对象`);
+        }
+        const content = typeof raw.content === 'string' ? raw.content.trim() : '';
+        const activeForm =
+          typeof raw.activeForm === 'string' ? raw.activeForm.trim() : '';
+        const status = raw.status;
+        if (!content) throw new Error(`todos[${i}].content 为空`);
+        if (!activeForm) throw new Error(`todos[${i}].activeForm 为空`);
+        if (status !== 'pending' && status !== 'in_progress' && status !== 'completed') {
+          throw new Error(
+            `todos[${i}].status 非法（需 pending / in_progress / completed）`
+          );
+        }
+        normalized.push({ content, activeForm, status });
+      }
+      // At most one in_progress at a time — mirrors Claude Code's rule and
+      // stops the model from "parallel-claiming" every item.
+      const inProgressCount = normalized.filter((t) => t.status === 'in_progress').length;
+      if (inProgressCount > 1) {
+        throw new Error('只能有一个任务处于 in_progress 状态');
+      }
+
+      useAppStore.getState().setAgentTodos(conversationId, normalized);
+
+      if (normalized.length === 0) return '任务列表已清空。';
+      const summary = normalized
+        .map((t) => {
+          const mark =
+            t.status === 'completed' ? '[x]' : t.status === 'in_progress' ? '[~]' : '[ ]';
+          const label = t.status === 'in_progress' ? t.activeForm : t.content;
+          return `${mark} ${label}`;
+        })
+        .join('\n');
+      return `已更新任务列表（${normalized.length} 项）：\n${summary}`;
     },
   },
 

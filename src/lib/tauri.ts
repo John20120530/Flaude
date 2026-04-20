@@ -170,6 +170,130 @@ export async function shellExec(opts: ShellOptions): Promise<ShellResult> {
 }
 
 // ---------------------------------------------------------------------------
+// Background shell bridge (agent-oriented persistent processes).
+//
+// Unlike shellExec (one-shot), these wrap the `shell_start` / `shell_read` /
+// `shell_write` / `shell_kill` commands that let the Code agent spawn a
+// long-running process and drain its output on demand. See
+// src-tauri/src/bgshell.rs for the protocol.
+// ---------------------------------------------------------------------------
+
+export interface BgShellStartOptions {
+  workspace: string;
+  command: string;
+  args?: string[];
+  cwd?: string;
+}
+
+export interface BgShellReadResult {
+  stdout: string;
+  stderr: string;
+  running: boolean;
+  code: number | null;
+  killed: boolean;
+  stdoutDropped: number;
+  stderrDropped: number;
+}
+
+interface RawBgShellRead {
+  stdout: string;
+  stderr: string;
+  running: boolean;
+  code: number | null;
+  killed: boolean;
+  stdout_dropped: number;
+  stderr_dropped: number;
+}
+
+export interface BgShellInfo {
+  id: string;
+  command: string;
+  args: string[];
+  startedMs: number;
+  running: boolean;
+  code: number | null;
+  killed: boolean;
+}
+
+interface RawBgShellInfo {
+  id: string;
+  command: string;
+  args: string[];
+  started_ms: number;
+  running: boolean;
+  code: number | null;
+  killed: boolean;
+}
+
+/** Start a background process. Returns a handle id for subsequent calls. */
+export async function shellStart(opts: BgShellStartOptions): Promise<string> {
+  const raw = await tauriInvoke<{ id: string }>('shell_start', {
+    workspace: opts.workspace,
+    command: opts.command,
+    args: opts.args ?? [],
+    cwd: opts.cwd,
+  });
+  return raw.id;
+}
+
+/**
+ * Drain buffered stdout/stderr since the last read. If `waitMs` > 0 and there's
+ * nothing buffered yet, blocks up to that many ms waiting for new output or an
+ * exit transition.
+ */
+export async function shellRead(
+  id: string,
+  waitMs = 0
+): Promise<BgShellReadResult> {
+  const raw = await tauriInvoke<RawBgShellRead>('shell_read', {
+    id,
+    waitMs,
+  });
+  return {
+    stdout: raw.stdout,
+    stderr: raw.stderr,
+    running: raw.running,
+    code: raw.code,
+    killed: raw.killed,
+    stdoutDropped: raw.stdout_dropped,
+    stderrDropped: raw.stderr_dropped,
+  };
+}
+
+/** Push bytes to the child process's stdin. The child sees them when it next reads. */
+export function shellWriteStdin(id: string, data: string): Promise<void> {
+  return tauriInvoke<void>('shell_write', { id, data });
+}
+
+/**
+ * Terminate the child process. Platform-specific signal (SIGKILL on Unix,
+ * TerminateProcess on Windows). Safe to call once per handle; subsequent
+ * calls after natural exit are no-ops.
+ */
+export function shellKill(id: string): Promise<void> {
+  return tauriInvoke<void>('shell_kill', { id });
+}
+
+/** List every live handle (running and recently exited). Newest first. */
+export async function shellList(): Promise<BgShellInfo[]> {
+  const raw = await tauriInvoke<RawBgShellInfo[]>('shell_list', {});
+  return raw.map((r) => ({
+    id: r.id,
+    command: r.command,
+    args: r.args,
+    startedMs: r.started_ms,
+    running: r.running,
+    code: r.code,
+    killed: r.killed,
+  }));
+}
+
+/** Forget a handle and free its buffers. Kills the process first if still running. */
+export function shellRemove(id: string): Promise<void> {
+  return tauriInvoke<void>('shell_remove', { id });
+}
+
+// ---------------------------------------------------------------------------
 // Dialog bridge (uses tauri-plugin-dialog)
 // ---------------------------------------------------------------------------
 

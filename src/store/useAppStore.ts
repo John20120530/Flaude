@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type {
+  AgentTodo,
   Attachment,
   Conversation,
   MCPServer,
@@ -162,6 +163,16 @@ interface AppState {
    */
   pendingWrites: PendingWrite[];
 
+  /**
+   * Per-conversation agent todo lists, keyed by conversation id. Populated
+   * by the built-in `todo_write` tool so the Code agent can publish its
+   * task breakdown. Not persisted: task lists are ephemeral session state,
+   * the conversation history preserves the tool-call snapshots we actually
+   * render. Rehydrating a stale list after app restart would surface
+   * misleading "in_progress" items with no agent to drive them.
+   */
+  agentTodos: Record<string, AgentTodo[]>;
+
   // M4: Memory + Skills
   /**
    * Global persistent memory — CLAUDE.md-style. Injected into every
@@ -311,6 +322,8 @@ interface AppState {
   /** Drop the resolved approval from the queue. Called from writeApproval.ts
    *  after the user clicks Apply or Reject. */
   removePendingWrite: (id: string) => void;
+  /** Replace the agent's task list for a conversation. Called by `todo_write`. */
+  setAgentTodos: (conversationId: string, todos: AgentTodo[]) => void;
 
   // M4: Memory + Skills
   setGlobalMemory: (text: string) => void;
@@ -407,6 +420,7 @@ export const useAppStore = create<AppState>()(
       allowFileWrites: false,
       allowShellExec: false,
       pendingWrites: [],
+      agentTodos: {},
 
       globalMemory: '',
       skills: [...BUILTIN_SKILLS],
@@ -480,6 +494,11 @@ export const useAppStore = create<AppState>()(
             // certainly been pushed at some point. Not perfect but avoids
             // keeping a "was this ever on the server" bit on every row.
             (s.conversations.find((c) => c.id === id)?.messages.length ?? 0) > 0;
+          // Drop any per-conversation agent todos so the map doesn't accumulate
+          // stale entries for deleted convs. (agentTodos isn't persisted, but
+          // it still matters for long-running sessions with a lot of churn.)
+          const nextTodos = { ...s.agentTodos };
+          delete nextTodos[id];
           return {
             conversations: s.conversations.filter((c) => c.id !== id),
             activeConversationId:
@@ -488,6 +507,7 @@ export const useAppStore = create<AppState>()(
             pendingDeletions: wasSynced
               ? [...s.pendingDeletions, id]
               : s.pendingDeletions,
+            agentTodos: nextTodos,
           };
         }),
       clearConversation: (id) =>
@@ -962,6 +982,19 @@ export const useAppStore = create<AppState>()(
         set((s) => ({
           pendingWrites: s.pendingWrites.filter((p) => p.id !== id),
         })),
+      setAgentTodos: (conversationId, todos) =>
+        set((s) => {
+          // Empty list is how the agent says "plan cleared" — keep the key
+          // present so subscribers see the transition, but don't inflate the
+          // map with stale entries for deleted conversations either.
+          const next = { ...s.agentTodos };
+          if (todos.length === 0) {
+            delete next[conversationId];
+          } else {
+            next[conversationId] = todos;
+          }
+          return { agentTodos: next };
+        }),
 
       // M4: Memory + Skills
       setGlobalMemory: (text) => set({ globalMemory: text }),

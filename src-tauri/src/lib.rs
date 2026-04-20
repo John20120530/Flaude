@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
+mod bgshell;
 mod pty;
 
 // ---------------------------------------------------------------------------
@@ -337,9 +338,21 @@ async fn shell_exec(params: ShellArgs) -> Result<ShellResult, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // Updater: checks a JSON manifest on GitHub Releases at startup (the
+        // frontend triggers the actual check via @tauri-apps/plugin-updater).
+        // Disabled in dev builds — a `tauri dev` run checking Releases for
+        // itself is just noise. Production MSI/NSIS bundles include it.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        // Process plugin — exposes `relaunch()` so the updater UI can restart
+        // the app after a successful install. `exit()` isn't wired anywhere.
+        .plugin(tauri_plugin_process::init())
         // PTY state is Tauri-managed so each handler gets a typed `State`
         // reference without us having to thread the HashMap manually.
         .manage(pty::PtyState::default())
+        // Background shell state — the agent's `shell_start` lives here.
+        // Separate from PtyState because the two serve very different callers:
+        // xterm wants every byte as an event, agent wants to poll on demand.
+        .manage(bgshell::BgShellState::default())
         .invoke_handler(tauri::generate_handler![
             fs_list_dir,
             fs_read_file,
@@ -351,6 +364,12 @@ pub fn run() {
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,
+            bgshell::shell_start,
+            bgshell::shell_read,
+            bgshell::shell_write,
+            bgshell::shell_kill,
+            bgshell::shell_list,
+            bgshell::shell_remove,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Flaude tauri application");

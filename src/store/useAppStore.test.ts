@@ -863,3 +863,72 @@ describe('restoreConflict / dismissConflict', () => {
     expect(s.conversations[0].title).toBe('brought-back');
   });
 });
+
+// =============================================================================
+// Agent todos (Code agent's self-maintained task list)
+// =============================================================================
+
+describe('setAgentTodos', () => {
+  it('writes and reads back a per-conversation task list', () => {
+    useAppStore.getState().setAgentTodos('c1', [
+      { content: 'Explore', activeForm: 'Exploring', status: 'completed' },
+      { content: 'Implement', activeForm: 'Implementing', status: 'in_progress' },
+      { content: 'Test', activeForm: 'Testing', status: 'pending' },
+    ]);
+    const list = useAppStore.getState().agentTodos['c1'];
+    expect(list).toHaveLength(3);
+    expect(list[1]).toEqual({
+      content: 'Implement',
+      activeForm: 'Implementing',
+      status: 'in_progress',
+    });
+  });
+
+  it('replaces the list wholesale on subsequent calls (not merge)', () => {
+    useAppStore
+      .getState()
+      .setAgentTodos('c1', [
+        { content: 'a', activeForm: 'A', status: 'pending' },
+        { content: 'b', activeForm: 'B', status: 'pending' },
+      ]);
+    useAppStore
+      .getState()
+      .setAgentTodos('c1', [{ content: 'c', activeForm: 'C', status: 'in_progress' }]);
+    const list = useAppStore.getState().agentTodos['c1'];
+    expect(list).toHaveLength(1);
+    expect(list[0].content).toBe('c');
+  });
+
+  it('clearing via empty array removes the conversation key entirely', () => {
+    useAppStore
+      .getState()
+      .setAgentTodos('c1', [{ content: 'x', activeForm: 'X', status: 'pending' }]);
+    useAppStore.getState().setAgentTodos('c1', []);
+    expect('c1' in useAppStore.getState().agentTodos).toBe(false);
+  });
+
+  it('does not cross-contaminate between conversations', () => {
+    useAppStore
+      .getState()
+      .setAgentTodos('c1', [{ content: 'a', activeForm: 'A', status: 'pending' }]);
+    useAppStore
+      .getState()
+      .setAgentTodos('c2', [{ content: 'b', activeForm: 'B', status: 'in_progress' }]);
+    const all = useAppStore.getState().agentTodos;
+    expect(all.c1[0].content).toBe('a');
+    expect(all.c2[0].content).toBe('b');
+  });
+});
+
+describe('deleteConversation drops agentTodos', () => {
+  it('removes the conversation\'s task list so the map does not leak', () => {
+    useAppStore.setState({
+      conversations: [makeConversation('c1')],
+    });
+    useAppStore
+      .getState()
+      .setAgentTodos('c1', [{ content: 'a', activeForm: 'A', status: 'pending' }]);
+    useAppStore.getState().deleteConversation('c1');
+    expect('c1' in useAppStore.getState().agentTodos).toBe(false);
+  });
+});
