@@ -26,7 +26,7 @@
  *     machine has its own workspace; re-granting permissions is safer than
  *     silently inheriting them.
  *   - Session/transient: auth, sync cursor, dirty sets, tombstone queues,
- *     pendingWrites, agentTodos, conflictRecords — none of these are meaningful
+ *     pendingWrites, conversationTodos, conflictRecords — none of these are meaningful
  *     after a restore onto a different client.
  *   - UI scratch: activeConversationId, activeProjectId, activeArtifactId —
  *     same argument; the user re-selects whatever they want to open.

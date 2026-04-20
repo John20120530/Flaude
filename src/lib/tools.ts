@@ -14,10 +14,9 @@
  * time a server reconnects.
  */
 
-import type { AgentTodo, WorkMode } from '@/types';
+import type { TodoItem, TodoStatus, WorkMode } from '@/types';
 import type { ToolSpec } from '@/services/providerClient';
 import { FlaudeApiError, webSearch } from '@/lib/flaudeApi';
-import { useAppStore } from '@/store/useAppStore';
 
 export type ToolSource = 'builtin' | 'mcp' | 'skill';
 
@@ -32,6 +31,14 @@ export interface ToolContext {
     content: string;
     language?: string;
   }) => void;
+  /**
+   * Hook for `todo_write`. Replaces the whole todo list for the conversation
+   * this call belongs to. We inject it through ctx (rather than having tools.ts
+   * import the store directly) so the registry stays store-agnostic and easy
+   * to unit-test — otherwise the module graph has a cycle: store → tools,
+   * tools → store.
+   */
+  setTodos?: (todos: TodoItem[]) => void;
 }
 
 export interface ToolDefinition {
@@ -378,40 +385,54 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
   },
 
   {
-    // Claude Code's "TodoWrite" dressed up for Flaude. The Code agent
-    // publishes its whole task breakdown on every call; we store it in
-    // `agentTodos[conversationId]` for UIs that want a pinned view, and we
-    // also embed the list in the tool result so ToolCallCard renders the
-    // snapshot inline in-conversation (mirrors Claude Code's transcript
-    // affordance exactly).
+    // Agent self-managed TODO list — modeled on Claude Code's TodoWrite.
     //
-    // Why expose this as a tool rather than, say, <todo> tags? Tools are
-    // structured JSON the agent is already trained to produce reliably;
-    // tags would leak into prose and regress with every model swap.
+    // Call pattern: the model passes the *full* list each time (not a patch).
+    // This keeps the contract dead simple — no "delete id 3, add after 5"
+    // operations — at the cost of some bytes per call. For realistic list
+    // sizes (5-15 items) the overhead is negligible and the reliability win
+    // is big: the model can't accidentally orphan an item by forgetting an
+    // op, and the store always reflects what the model currently believes
+    // the plan is.
+    //
+    // We gate this to code mode because that's where multi-step agent runs
+    // actually happen. In chat mode a todo list would just be noise.
+    //
+    // We deliberately DON'T reject lists with multiple `in_progress` items —
+    // smaller models sometimes forget to flip the previous one to completed,
+    // and a hard rejection would waste a tool round-trip. The UI highlights
+    // the oldest in_progress as the "current" one, which is usually right.
     name: 'todo_write',
     description:
-      'Publish or update your task list for this conversation. Call this when ' +
-      'starting a non-trivial task (3+ steps) to plan, and again each time a ' +
-      'step completes or a new one is discovered. Always pass the FULL list — ' +
-      'this replaces the previous snapshot entirely. Mark exactly one task as ' +
-      'in_progress at a time. Include both an imperative `content` and a ' +
-      'present-continuous `activeForm` per item.',
+      'Maintain a visible TODO list for the current task so the user can see ' +
+      'what you are planning and what\'s done. Call this when you start a ' +
+      'multi-step task, and again after each step completes (mark that item ' +
+      '`completed` and promote the next to `in_progress`). Each call replaces ' +
+      'the entire list — always send every item every time. Keep exactly one ' +
+      'item `in_progress` at a time. Pass an empty array to clear the list ' +
+      'when the task is done.\n\n' +
+      'Each item has:\n' +
+      '  - content: imperative form, e.g. "Fix the auth bug"\n' +
+      '  - activeForm: present-continuous form, e.g. "Fixing the auth bug"\n' +
+      '  - status: "pending" | "in_progress" | "completed"',
     parameters: {
       type: 'object',
       properties: {
         todos: {
           type: 'array',
-          description: 'The complete current task list. Empty array clears it.',
+          description:
+            'Full TODO list after this update. An empty array clears the list.',
           items: {
             type: 'object',
             properties: {
               content: {
                 type: 'string',
-                description: 'Imperative description, e.g. "Run tests".',
+                description: 'Imperative form, e.g. "Run the migration".',
               },
               activeForm: {
                 type: 'string',
-                description: 'Present-continuous, e.g. "Running tests".',
+                description:
+                  'Present-continuous form shown while in_progress, e.g. "Running the migration".',
               },
               status: {
                 type: 'string',
@@ -426,48 +447,63 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
     },
     source: 'builtin',
     modes: ['code'],
-    handler: async ({ todos }, { conversationId }) => {
-      if (!Array.isArray(todos)) {
-        throw new Error('todos 必须是数组');
+    handler: async ({ todos }, { setTodos }) => {
+      if (!setTodos) {
+        throw new Error('当前上下文不支持 todo_write（缺少 setTodos 钩子）');
       }
-      const normalized: AgentTodo[] = [];
+      if (!Array.isArray(todos)) {
+        throw new Error('todos 必须是一个数组');
+      }
+      // Validate + normalize each entry. We're defensive here because the
+      // model sometimes returns near-valid shapes (e.g. status="todo" instead
+      // of "pending") — better to say "I rejected this, here's why" than to
+      // store garbage that crashes the renderer.
+      const validStatuses: readonly TodoStatus[] = [
+        'pending',
+        'in_progress',
+        'completed',
+      ];
+      const cleaned: TodoItem[] = [];
       for (let i = 0; i < todos.length; i++) {
-        const raw = todos[i] as Record<string, unknown>;
+        const raw = todos[i] as Record<string, unknown> | null | undefined;
         if (!raw || typeof raw !== 'object') {
-          throw new Error(`todos[${i}] 不是对象`);
+          throw new Error(`第 ${i + 1} 项不是对象`);
         }
         const content = typeof raw.content === 'string' ? raw.content.trim() : '';
         const activeForm =
           typeof raw.activeForm === 'string' ? raw.activeForm.trim() : '';
-        const status = raw.status;
-        if (!content) throw new Error(`todos[${i}].content 为空`);
-        if (!activeForm) throw new Error(`todos[${i}].activeForm 为空`);
-        if (status !== 'pending' && status !== 'in_progress' && status !== 'completed') {
+        const status = raw.status as TodoStatus;
+        if (!content) {
+          throw new Error(`第 ${i + 1} 项缺少 content（祈使句形式）`);
+        }
+        if (!activeForm) {
+          throw new Error(`第 ${i + 1} 项缺少 activeForm（进行时形式）`);
+        }
+        if (!validStatuses.includes(status)) {
           throw new Error(
-            `todos[${i}].status 非法（需 pending / in_progress / completed）`
+            `第 ${i + 1} 项 status 无效（${String(raw.status)}），必须是 pending | in_progress | completed`
           );
         }
-        normalized.push({ content, activeForm, status });
-      }
-      // At most one in_progress at a time — mirrors Claude Code's rule and
-      // stops the model from "parallel-claiming" every item.
-      const inProgressCount = normalized.filter((t) => t.status === 'in_progress').length;
-      if (inProgressCount > 1) {
-        throw new Error('只能有一个任务处于 in_progress 状态');
+        cleaned.push({ content, activeForm, status });
       }
 
-      useAppStore.getState().setAgentTodos(conversationId, normalized);
+      setTodos(cleaned);
 
-      if (normalized.length === 0) return '任务列表已清空。';
-      const summary = normalized
-        .map((t) => {
-          const mark =
-            t.status === 'completed' ? '[x]' : t.status === 'in_progress' ? '[~]' : '[ ]';
-          const label = t.status === 'in_progress' ? t.activeForm : t.content;
-          return `${mark} ${label}`;
-        })
-        .join('\n');
-      return `已更新任务列表（${normalized.length} 项）：\n${summary}`;
+      if (cleaned.length === 0) {
+        return '已清空 TODO 列表。';
+      }
+      const counts = cleaned.reduce(
+        (acc, t) => {
+          acc[t.status] += 1;
+          return acc;
+        },
+        { pending: 0, in_progress: 0, completed: 0 } as Record<TodoStatus, number>
+      );
+      const active = cleaned.find((t) => t.status === 'in_progress');
+      const summary =
+        `已更新 TODO 列表：共 ${cleaned.length} 项，` +
+        `${counts.completed} 已完成 / ${counts.in_progress} 进行中 / ${counts.pending} 待办。`;
+      return active ? `${summary} 当前：${active.activeForm}` : summary;
     },
   },
 

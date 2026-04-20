@@ -228,7 +228,7 @@ describe('buildAccountBundle content', () => {
           submittedAt: Date.now(),
         },
       ],
-      agentTodos: { c1: [{ content: 'x', activeForm: 'X', status: 'pending' }] },
+      conversationTodos: { c1: [{ content: 'x', activeForm: 'X', status: 'pending' }] },
       conflictRecords: [
         {
           conversationId: 'c1',
@@ -245,7 +245,7 @@ describe('buildAccountBundle content', () => {
     expect(keys).not.toContain('lastSyncAt');
     expect(keys).not.toContain('dirtyConversationIds');
     expect(keys).not.toContain('pendingWrites');
-    expect(keys).not.toContain('agentTodos');
+    expect(keys).not.toContain('conversationTodos');
     expect(keys).not.toContain('conflictRecords');
     // And the settings sub-block too — this is the more likely place for a
     // regression where someone adds a new per-device flag to partialize and

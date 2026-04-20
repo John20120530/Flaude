@@ -9,7 +9,13 @@ import {
   estimateTokens,
 } from '@/lib/tokenEstimate';
 import { summarizeConversation } from '@/lib/conversationSummary';
-import type { Attachment, Conversation, Message, ToolCall } from '@/types';
+import type {
+  Attachment,
+  Conversation,
+  Message,
+  TodoItem,
+  ToolCall,
+} from '@/types';
 import type { ArtifactType } from '@/lib/artifacts';
 
 interface Options {
@@ -62,6 +68,7 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
   const patchLastMessage = useAppStore((s) => s.patchLastMessage);
   const upsertArtifact = useAppStore((s) => s.upsertArtifact);
   const setConversationSummary = useAppStore((s) => s.setConversationSummary);
+  const setConversationTodos = useAppStore((s) => s.setConversationTodos);
   const providers = useAppStore((s) => s.providers);
   const [streaming, setStreaming] = useState(false);
   /**
@@ -93,6 +100,15 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
       });
     },
     [upsertArtifact]
+  );
+
+  // Conversation-scoped setTodos adapter for the todo_write tool. Closing over
+  // `conversation.id` here keeps the tool handler conversation-agnostic — it
+  // just calls `setTodos(...)` and trusts the adapter to route to the right
+  // bucket. Same pattern as `upsertArtifactAdapter` above.
+  const setTodosAdapter = useCallback(
+    (todos: TodoItem[]) => setConversationTodos(conversation.id, todos),
+    [setConversationTodos, conversation.id]
   );
 
   /**
@@ -223,6 +239,7 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
             conversationId: conversation.id,
             signal: controller.signal,
             upsertArtifact: upsertArtifactAdapter,
+            setTodos: setTodosAdapter,
           });
           tc.status = 'success';
           tc.result = resultText;
@@ -265,6 +282,7 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
       patchLastMessage,
       upsertArtifact,
       upsertArtifactAdapter,
+      setTodosAdapter,
     ]
   );
 
