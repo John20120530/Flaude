@@ -42,6 +42,15 @@ export default function MessageList({
   onClearSummary,
 }: Props) {
   const endRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  /**
+   * Follow-tail gate for streaming updates. Starts true (so the very first
+   * stream-in jumps to bottom like before) and flips off the moment the user
+   * scrolls away from the bottom. Ref, not state, because every token tick
+   * would otherwise re-render the whole list — and the flag's value is only
+   * read inside the auto-scroll effect which re-runs anyway on content change.
+   */
+  const followTailRef = useRef<boolean>(true);
   const location = useLocation();
   // Fallback flash state — used only when we can't find the matched query
   // inside the rendered message DOM (e.g. the query spans markdown inline
@@ -135,12 +144,44 @@ export default function MessageList({
     };
   }, [location.hash, location.state, conversationId]);
 
-  // Bottom-scroll on new content — but skip when we're handling a hash jump,
-  // otherwise the jump would fight the bottom-scroll.
+  // Jump to bottom when a NEW message arrives (user sends, or the assistant
+  // placeholder appends to start streaming). This path is unconditional — if
+  // the user just hit Enter, they want to see the response, even if they'd
+  // scrolled up earlier to reread something. Resets the follow-tail gate so
+  // token streaming that follows is also allowed to auto-scroll.
   useEffect(() => {
     if (location.hash.startsWith('#msg-')) return;
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages.length, messages[messages.length - 1]?.content, location.hash]);
+    followTailRef.current = true;
+  }, [messages.length, location.hash]);
+
+  // Token-stream scroll: follow the last message's growing content — BUT only
+  // while the user is still pinned to the bottom. Once they scroll up to
+  // reread something earlier, stop yanking them back. The onScroll handler
+  // below flips the ref as soon as they cross the threshold; scrolling back
+  // to the bottom re-enables follow.
+  //
+  // `auto` (not `smooth`) because each token fires this effect and a queue of
+  // 200ms smooth-scroll animations would visibly lag behind the text.
+  useEffect(() => {
+    if (location.hash.startsWith('#msg-')) return;
+    if (!followTailRef.current) return;
+    endRef.current?.scrollIntoView({ behavior: 'auto' });
+  }, [messages[messages.length - 1]?.content, location.hash]);
+
+  /**
+   * Flip follow-tail on every scroll event. 64px threshold is a compromise:
+   * big enough that a small overshoot on a smooth-scroll-to-bottom doesn't
+   * accidentally disarm it, small enough that any intentional upward scroll
+   * registers immediately. Runs cheap — one subtraction + comparison per
+   * event, no DOM reads beyond the three props we already need.
+   */
+  const onScroll = () => {
+    const el = containerRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    followTailRef.current = distanceFromBottom <= 64;
+  };
 
   if (messages.length === 0) {
     return (
@@ -205,7 +246,7 @@ export default function MessageList({
   );
 
   return (
-    <div className="flex-1 overflow-y-auto">
+    <div ref={containerRef} onScroll={onScroll} className="flex-1 overflow-y-auto">
       <div className="max-w-3xl mx-auto px-6 py-6 space-y-6">
         {effectiveSummaryCount > 0 && summary && showArchived && (
           <div className="rounded-lg border border-dashed border-claude-border dark:border-night-border bg-claude-surface/40 dark:bg-night-surface/40 px-3 py-2 text-xs text-claude-muted dark:text-night-muted">

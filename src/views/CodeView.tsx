@@ -121,7 +121,20 @@ export default function CodeView() {
     }
     try {
       const picked = await pickFolder('选择工作区');
-      if (picked) setWorkspacePath(picked);
+      if (!picked) return; // user cancelled the dialog
+      // Re-picking the same folder is a no-op — no state change, no new conv.
+      // Without this guard a user who clicked "更换工作区" and then re-selected
+      // their current workspace would lose their scroll position + open tabs.
+      if (picked === workspacePath) return;
+      setWorkspacePath(picked);
+      // Previous conversation's tool calls all referenced the OLD workspace
+      // (`fs_read_file src/foo.ts` against a different root is meaningless),
+      // and the system prompt's workspace-path hint is now stale. Fork to a
+      // fresh conv so the agent starts cold with the new root. The old one
+      // isn't deleted — it stays in the sidebar so the user can click back.
+      // Preserve the project association if the current conv had one.
+      const newId = newConversation('code', conversation?.projectId);
+      navigate(`/code/${newId}`);
     } catch (e) {
       alert((e as Error).message);
     }
