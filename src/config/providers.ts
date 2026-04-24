@@ -14,24 +14,41 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = [
     enabled: true,
     models: [
       {
+        // `deepseek-chat` 这个别名 DeepSeek 官方悄悄迁到了 V4 flash 非思考模式，
+        // 为不破坏老对话里 localStorage 存下来的 modelId，我们保留别名，只更新
+        // 展示名和描述。新用户也会拿到 V4，老用户无感升级。
         id: 'deepseek-chat',
         providerId: 'deepseek',
-        displayName: 'DeepSeek V3',
-        description: '通用对话，代码能力强，性价比极高',
-        contextWindow: 128_000,
+        displayName: 'DeepSeek V4 Flash',
+        description: '通用对话，1M 上下文，工具调用稳定，性价比极高（$0.14/M in）',
+        contextWindow: 1_000_000,
         capabilities: { tools: true },
         recommendedFor: ['chat', 'code'],
       },
       {
-        // V3.2 的"思考模式"；和 deepseek-chat 共享底座，只是调用时走推理路径、
-        // 响应里多一份 reasoning_content。不支持工具调用（官方限制）。
+        // V4 的"思考模式"；和 deepseek-chat 共享底座，只是调用时走推理路径、
+        // 响应里多一份 reasoning_content。V4 里思考其实是个请求参数，但为了
+        // 保持 UI 的「深度思考」一键切换逻辑，我们仍把它暴露成独立 model ID，
+        // 并复用 `deepseek-reasoner` 别名——官方同样迁到了 V4 flash 思考模式。
         id: 'deepseek-reasoner',
         providerId: 'deepseek',
-        displayName: 'DeepSeek Reasoner',
-        description: '深度思考模式（V3.2 hybrid），数学/代码/逻辑最强；不支持工具调用',
-        contextWindow: 128_000,
-        capabilities: { tools: false, reasoning: true },
+        displayName: 'DeepSeek V4 Flash · Thinking',
+        description: '深度思考模式（V4 hybrid），数学/代码/逻辑推理最强',
+        contextWindow: 1_000_000,
+        capabilities: { tools: true, reasoning: true },
         recommendedFor: ['chat', 'code'],
+      },
+      {
+        // V4 旗舰，真正的升级档位。比 flash 贵 ~12 倍但推理/代码/长文都更强；
+        // 默认不选它，让用户在重任务里主动切过来。思考模式同样是参数化的，
+        // 但我们只暴露一个 ID——Pro 本身就贵到不适合随手开深度思考。
+        id: 'deepseek-v4-pro',
+        providerId: 'deepseek',
+        displayName: 'DeepSeek V4 Pro',
+        description: '旗舰模型，1M 上下文，数学/代码/长文最强；$1.74/M in，重任务再开',
+        contextWindow: 1_000_000,
+        capabilities: { tools: true, reasoning: true, longContext: true },
+        recommendedFor: ['code'],
       },
     ],
   },
