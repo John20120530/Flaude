@@ -1646,6 +1646,39 @@ export const useAppStore = create<AppState>()(
             state.slashCommands.push({ ...b });
           }
         }
+        // Re-seed the provider catalog from DEFAULT_PROVIDERS on every rehydrate.
+        // The catalog (ids, displayName, baseUrl, models[], descriptions,
+        // capabilities, context windows) is code-owned single source of truth;
+        // only `apiKey` and `enabled` are user-owned. Without this merge, when
+        // we ship a catalog update (new model, renamed label, new V4 family),
+        // existing users stay stuck on the localStorage snapshot forever —
+        // because zustand's persist restores whatever was there on last shutdown.
+        //
+        // We do this unconditionally (no version counter) because the merge is
+        // idempotent: for a user on an up-to-date catalog, the DEFAULT side
+        // already matches theirs; the only effect is rebuilding the objects.
+        if (Array.isArray(state.providers)) {
+          const userOverlay = new Map(
+            state.providers.map((p) => [
+              p.id,
+              { apiKey: p.apiKey, enabled: p.enabled },
+            ])
+          );
+          state.providers = DEFAULT_PROVIDERS.map((canonical) => {
+            const overlay = userOverlay.get(canonical.id);
+            if (!overlay) return { ...canonical };
+            return {
+              ...canonical,
+              // apiKey is sacred — losing it would force the user to re-enter
+              // every provider key after every app update. enabled likewise:
+              // user may have deliberately turned MiniMax off.
+              apiKey: overlay.apiKey,
+              enabled: overlay.enabled ?? canonical.enabled,
+            };
+          });
+        } else {
+          state.providers = [...DEFAULT_PROVIDERS];
+        }
         // Re-seed any missing built-in skills (e.g. after app upgrade added new ones).
         // We keep the user's enabled/disabled choice + any edits they made to
         // existing built-ins; only brand-new built-ins get appended.
