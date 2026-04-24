@@ -1083,11 +1083,41 @@ export const useAppStore = create<AppState>()(
       setAuth: ({ token, user }) =>
         set({ auth: { token, user, loggedInAt: Date.now() } }),
       clearAuth: () =>
-        // Dropping auth also resets sync state — another user logging in next
-        // shouldn't inherit the previous user's cursor or dirty set (which
-        // would cause their first push to contain someone else's edits).
+        // Logout wipes *everything* tied to the user's identity — auth, sync
+        // bookkeeping, and the full content set (conversations, projects,
+        // artifacts, skills, memory, per-user tool config). Otherwise, when a
+        // different user logs in next, their initial pull merges on top of
+        // the previous user's cached data and they see someone else's
+        // conversations (classic cross-account data leak — localStorage
+        // doesn't care who you are).
+        //
+        // Deliberately *preserved* — these are machine preferences, not user
+        // data: theme / sidebarOpen / artifactsPanelWidth / activeMode /
+        // modelByMode / providers (server catalog mirror), and per-device
+        // permissions (workspacePath / allowFileWrites / allowShellExec).
+        // A user logging back into the same machine keeps their UI setup and
+        // doesn't have to re-grant shell/file permissions.
+        //
+        // Skills + slash commands reset to the builtin seed so the next user
+        // starts with a clean baseline — their own user-authored skills will
+        // re-sync from the server on pull.
         set({
           auth: null,
+          // User content
+          conversations: [],
+          activeConversationId: null,
+          projects: [],
+          activeProjectId: null,
+          artifacts: {},
+          activeArtifactId: null,
+          skills: [...BUILTIN_SKILLS],
+          slashCommands: [...BUILTIN_SLASH_COMMANDS],
+          mcpServers: [],
+          disabledToolNames: [],
+          globalMemory: '',
+          conversationTodos: {},
+          pendingWrites: [],
+          // Sync bookkeeping
           lastSyncAt: null,
           dirtyConversationIds: [],
           pendingDeletions: [],

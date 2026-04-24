@@ -797,6 +797,90 @@ describe('clearAuth', () => {
     expect(s.syncError).toBeNull();
     expect(s.conflictRecords).toEqual([]);
   });
+
+  it('wipes the previous user content so the next user does not inherit it', () => {
+    // Regression: logging out then logging in as a different user was
+    // rendering the previous account's conversations because clearAuth
+    // only touched sync state, not the cached content. localStorage
+    // persistence made it survive across the account switch.
+    useAppStore.getState().setAuth(fakeAuth);
+    useAppStore.setState({
+      conversations: [makeConversation('c1', { title: 'user-a private' })],
+      activeConversationId: 'c1',
+      projects: [makeProject('p1', { name: 'user-a proj' })],
+      activeProjectId: 'p1',
+      artifacts: {
+        a1: {
+          id: 'a1',
+          type: 'html',
+          title: 'secret',
+          content: '<p/>',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        } as Artifact,
+      },
+      activeArtifactId: 'a1',
+      globalMemory: 'remember alice lives at 221B',
+      mcpServers: [
+        {
+          id: 'm1',
+          name: 'private',
+          url: 'http://x',
+          enabled: true,
+          status: 'disconnected',
+        },
+      ],
+      disabledToolNames: ['web_fetch'],
+      conversationTodos: { c1: [{ content: 'x', activeForm: 'X', status: 'pending' }] },
+    });
+
+    useAppStore.getState().clearAuth();
+
+    const s = useAppStore.getState();
+    expect(s.conversations).toEqual([]);
+    expect(s.activeConversationId).toBeNull();
+    expect(s.projects).toEqual([]);
+    expect(s.activeProjectId).toBeNull();
+    expect(s.artifacts).toEqual({});
+    expect(s.activeArtifactId).toBeNull();
+    expect(s.globalMemory).toBe('');
+    expect(s.mcpServers).toEqual([]);
+    expect(s.disabledToolNames).toEqual([]);
+    expect(s.conversationTodos).toEqual({});
+    // Skills + slash commands reset to the built-in seed (user-authored
+    // ones are gone; built-ins stay because they ship with the client).
+    expect(s.skills.every((sk) => sk.builtin === true)).toBe(true);
+    expect(s.slashCommands.every((sc) => sc.builtin === true)).toBe(true);
+  });
+
+  it('preserves machine-local preferences that are not tied to user identity', () => {
+    // Counterpart to the wipe test: theme / layout / per-device permissions
+    // stay so a user logging back in on the same machine keeps their setup
+    // and does not have to re-grant shell/file-write permissions.
+    useAppStore.getState().setAuth(fakeAuth);
+    useAppStore.setState({
+      theme: 'dark',
+      sidebarOpen: false,
+      artifactsPanelWidth: 600,
+      activeMode: 'code',
+      modelByMode: { chat: 'x', code: 'y' },
+      workspacePath: 'C:/ws',
+      allowFileWrites: true,
+      allowShellExec: true,
+    });
+
+    useAppStore.getState().clearAuth();
+
+    const s = useAppStore.getState();
+    expect(s.theme).toBe('dark');
+    expect(s.sidebarOpen).toBe(false);
+    expect(s.artifactsPanelWidth).toBe(600);
+    expect(s.activeMode).toBe('code');
+    expect(s.modelByMode).toEqual({ chat: 'x', code: 'y' });
+    expect(s.workspacePath).toBe('C:/ws');
+    expect(s.allowFileWrites).toBe(true);
+    expect(s.allowShellExec).toBe(true);
+  });
 });
 
 // =============================================================================
