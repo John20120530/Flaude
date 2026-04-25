@@ -10,10 +10,17 @@
  * Design notes:
  *   - The iframe uses `srcdoc` (not `src`) so we never round-trip through a
  *     blob: URL — keeps the rendered HTML in DevTools the same as the source.
- *   - Sandbox is `allow-scripts` only. NOT `allow-same-origin`. This means
- *     the iframe runs as an opaque origin, so any `fetch()` / cookie /
- *     localStorage call inside the design fails by design — which matches
- *     what we tell the model in `designSystemPrompt.ts`.
+ *   - The PREVIEW iframe's sandbox is `allow-scripts` only. NOT
+ *     `allow-same-origin`. This means the iframe runs as an opaque origin,
+ *     so any `fetch()` / cookie / localStorage call inside the design
+ *     fails by design — which matches what we tell the model in
+ *     `designSystemPrompt.ts`.
+ *   - The EXPORT iframe (used only for PNG capture, mounted offscreen and
+ *     destroyed after one snapshot) does grant `allow-same-origin` because
+ *     html2canvas internally creates a clone iframe whose contentDocument
+ *     it has to read back — that readback only works when both iframes
+ *     share an origin. See `capturePng` below for the rationale + the
+ *     security boundaries that keep this from being scary.
  *   - PNG export uses html2canvas inside the iframe, talking to the parent
  *     via postMessage. The bridge script (see `designExtract.ts`) is only
  *     injected when the user clicks 导出 PNG, so the typical preview path
@@ -355,7 +362,23 @@ async function capturePng(block: DesignBlock, scale: number): Promise<string> {
 
   return new Promise<string>((resolve, reject) => {
     const iframe = document.createElement('iframe');
-    iframe.setAttribute('sandbox', 'allow-scripts');
+    // `allow-same-origin` is mandatory here — html2canvas internally clones
+    // the document into a temporary inner iframe and needs to read its
+    // contentDocument back. Without same-origin, the outer (opaque-null)
+    // and inner (also opaque-null) iframes are *different* opaque origins
+    // and the browser blocks the readback with
+    //   "Failed to read a named property 'document' from 'Window':
+    //    Blocked a frame with origin 'null' from accessing a cross-origin
+    //    frame."
+    // The PREVIEW iframe (in the JSX above) stays locked down — that one
+    // displays user-iterated designs interactively and we don't want them
+    // touching parent state. The EXPORT iframe is throwaway: we mount it
+    // offscreen, capture once, then remove. The 8s ceiling above puts a
+    // hard cap on its lifetime. The trade-off is acceptable because (a)
+    // designs are produced by Flaude's own model + system prompt, not
+    // user-uploaded HTML, and (b) the user has to explicitly click 导出
+    // PNG to spawn this iframe at all.
+    iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
     iframe.title = 'Design export';
     iframe.style.position = 'fixed';
     iframe.style.left = '-99999px';
@@ -389,9 +412,10 @@ async function capturePng(block: DesignBlock, scale: number): Promise<string> {
     };
 
     const onMessage = (e: MessageEvent) => {
-      // The export bridge runs in an opaque-origin sandbox, so e.source is
-      // our iframe but e.origin is "null". Match on contentWindow identity
-      // — postMessage preserves it across the boundary.
+      // We match on contentWindow identity rather than origin: postMessage
+      // preserves the source Window reference across the boundary, which is
+      // robust regardless of whether the iframe was launched as opaque-null
+      // or (since the export-iframe fix) inheriting our origin.
       if (e.source !== iframe.contentWindow) return;
       const data = e.data as
         | { type: 'flaude-capture-ready' }
