@@ -1,6 +1,6 @@
 [package]
 name = "flaude-app"
-version = "0.1.8"
+version = "0.1.9"
 description = "Flaude — a Claude-like desktop client for Chinese open-source LLMs"
 edition = "2021"
 rust-version = "1.77"
