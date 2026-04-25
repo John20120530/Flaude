@@ -38,10 +38,26 @@ export interface ProviderConfig {
 // DeepSeek pricing as of 2026-04 (always re-check https://api-docs.deepseek.com
 // before a deploy; prices have dropped twice in the last year).
 //
-//   deepseek-chat     : input  $0.27 / 1M  (cache miss)  →  270 micros/1k
-//                       output $1.10 / 1M                → 1100 micros/1k
-//   deepseek-reasoner : input  $0.55 / 1M                →  550 micros/1k
-//                       output $2.19 / 1M                → 2190 micros/1k
+//   deepseek-chat       : input  $0.27 / 1M  (cache miss)  →  270 micros/1k
+//                         output $1.10 / 1M                → 1100 micros/1k
+//   deepseek-reasoner   : input  $0.55 / 1M                →  550 micros/1k
+//                         output $2.19 / 1M                → 2190 micros/1k
+//   deepseek-v4-flash   : input  $0.14 / 1M                →  140 micros/1k
+//                         output $0.55 / 1M                →  550 micros/1k
+//   deepseek-v4-pro     : input  $1.74 / 1M                → 1740 micros/1k
+//                         output $8.70 / 1M                → 8700 micros/1k
+//
+// V4 family note: the new `deepseek-v4-flash` and `deepseek-v4-pro` IDs are
+// what the upstream actually exposes for the V4 series — clients pick them
+// directly. The legacy `deepseek-chat` / `deepseek-reasoner` IDs remain
+// accepted by the upstream until 2026-07-24, after which they're retired and
+// callers must use the V4-* IDs. We register both today so:
+//   - Existing conversations in users' localStorage with modelId='deepseek-chat'
+//     keep working through the transition,
+//   - New conversations created in v0.1.9+ stamp 'deepseek-v4-pro' (Design
+//     mode default) or 'deepseek-v4-flash' and route correctly.
+// Cleanup of the legacy entries should ship in the deploy after 2026-07-24,
+// at which point the upstream will start returning 400 for them anyway.
 //
 // We ignore cache-hit discounts in accounting — the savings are small at our
 // scale and it's not worth tracking the hit/miss split.
@@ -50,8 +66,10 @@ const DEEPSEEK: ProviderConfig = {
   baseUrl: 'https://api.deepseek.com/v1/chat/completions',
   keyEnvName: 'DEEPSEEK_API_KEY',
   models: {
-    'deepseek-chat':     { inputMicroUsdPer1k: 270, outputMicroUsdPer1k: 1100 },
-    'deepseek-reasoner': { inputMicroUsdPer1k: 550, outputMicroUsdPer1k: 2190 },
+    'deepseek-chat':       { inputMicroUsdPer1k:  270, outputMicroUsdPer1k: 1100 },
+    'deepseek-reasoner':   { inputMicroUsdPer1k:  550, outputMicroUsdPer1k: 2190 },
+    'deepseek-v4-flash':   { inputMicroUsdPer1k:  140, outputMicroUsdPer1k:  550 },
+    'deepseek-v4-pro':     { inputMicroUsdPer1k: 1740, outputMicroUsdPer1k: 8700 },
   },
 };
 
@@ -61,12 +79,16 @@ const DEEPSEEK: ProviderConfig = {
 // different request schema.
 //
 // Pricing as of 2026-04 (DashScope public rates, converted from CNY @ ~¥7/$):
-//   qwen-turbo : input  ¥0.3 / 1M  ≈ $0.043 → 43 micros/1k
-//                output ¥0.6 / 1M  ≈ $0.086 → 86 micros/1k
-//   qwen-plus  : input  ¥0.8 / 1M  ≈ $0.114 → 114 micros/1k
-//                output ¥2.0 / 1M  ≈ $0.286 → 286 micros/1k
-//   qwen-max   : input  ¥2.4 / 1M  ≈ $0.343 → 343 micros/1k
-//                output ¥9.6 / 1M  ≈ $1.371 → 1371 micros/1k
+//   qwen-turbo       : input  ¥0.3 / 1M  ≈ $0.043 → 43 micros/1k
+//                      output ¥0.6 / 1M  ≈ $0.086 → 86 micros/1k
+//   qwen-plus        : input  ¥0.8 / 1M  ≈ $0.114 → 114 micros/1k
+//                      output ¥2.0 / 1M  ≈ $0.286 → 286 micros/1k
+//   qwen-max         : input  ¥2.4 / 1M  ≈ $0.343 → 343 micros/1k
+//                      output ¥9.6 / 1M  ≈ $1.371 → 1371 micros/1k
+//   qwen-long        : input  ¥0.5 / 1M  ≈ $0.071 → 71 micros/1k  (long-ctx tier)
+//                      output ¥2.0 / 1M  ≈ $0.286 → 286 micros/1k
+//   qwen-coder-plus  : input  ¥3.5 / 1M  ≈ $0.500 → 500 micros/1k (coder tier)
+//                      output ¥7.0 / 1M  ≈ $1.000 → 1000 micros/1k
 //
 // Re-check before production; Alibaba adjusts prices quarterly.
 const QWEN: ProviderConfig = {
@@ -74,9 +96,11 @@ const QWEN: ProviderConfig = {
   baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
   keyEnvName: 'QWEN_API_KEY',
   models: {
-    'qwen-turbo': { inputMicroUsdPer1k:  43, outputMicroUsdPer1k:   86 },
-    'qwen-plus':  { inputMicroUsdPer1k: 114, outputMicroUsdPer1k:  286 },
-    'qwen-max':   { inputMicroUsdPer1k: 343, outputMicroUsdPer1k: 1371 },
+    'qwen-turbo':       { inputMicroUsdPer1k:  43, outputMicroUsdPer1k:   86 },
+    'qwen-plus':        { inputMicroUsdPer1k: 114, outputMicroUsdPer1k:  286 },
+    'qwen-max':         { inputMicroUsdPer1k: 343, outputMicroUsdPer1k: 1371 },
+    'qwen-long':        { inputMicroUsdPer1k:  71, outputMicroUsdPer1k:  286 },
+    'qwen-coder-plus':  { inputMicroUsdPer1k: 500, outputMicroUsdPer1k: 1000 },
   },
 };
 
@@ -110,6 +134,12 @@ const ZHIPU: ProviderConfig = {
 //   moonshot-v1-8k   : ¥12 / 1M  ≈ $1.71  → 1714 micros/1k (both dirs)
 //   moonshot-v1-32k  : ¥24 / 1M  ≈ $3.43  → 3429 micros/1k
 //   moonshot-v1-128k : ¥60 / 1M  ≈ $8.57  → 8571 micros/1k
+//   moonshot-v1-auto : Moonshot picks the cheapest tier large enough for the
+//                      prompt. We bill at the 128k rate (worst case) since we
+//                      can't see Moonshot's tier choice from the response;
+//                      this slightly over-bills auto-mode users on short
+//                      prompts but never under-bills, which is the right
+//                      direction for a prepaid quota system.
 //
 // Re-check upstream before production.
 const MOONSHOT: ProviderConfig = {
@@ -120,6 +150,7 @@ const MOONSHOT: ProviderConfig = {
     'moonshot-v1-8k':   { inputMicroUsdPer1k: 1714, outputMicroUsdPer1k: 1714 },
     'moonshot-v1-32k':  { inputMicroUsdPer1k: 3429, outputMicroUsdPer1k: 3429 },
     'moonshot-v1-128k': { inputMicroUsdPer1k: 8571, outputMicroUsdPer1k: 8571 },
+    'moonshot-v1-auto': { inputMicroUsdPer1k: 8571, outputMicroUsdPer1k: 8571 },
   },
 };
 
