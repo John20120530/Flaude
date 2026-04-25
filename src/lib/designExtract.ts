@@ -58,6 +58,104 @@ function normaliseFormat(lang: string, body: string): DesignFormat | null {
 }
 
 /**
+ * Languages the design system prompt asks the model to emit. Used by the
+ * collapse helper below to decide whether a given fence should be hidden
+ * from the chat thread (because the canvas already renders it) or left
+ * inline (because it's just prose context — e.g. ```bash for a CLI hint).
+ */
+const DESIGN_FENCE_LANGS = new Set([
+  'html',
+  'jsx',
+  'tsx',
+  'react',
+  'svg',
+  'mermaid',
+]);
+
+function langToFormat(lang: string): DesignFormat | null {
+  if (lang === 'html') return 'html';
+  if (lang === 'jsx' || lang === 'tsx' || lang === 'react') return 'jsx';
+  if (lang === 'svg') return 'svg';
+  if (lang === 'mermaid') return 'mermaid';
+  return null;
+}
+
+/**
+ * Rewrite an assistant message's content for display in DesignView's chat
+ * column. Each *design* fence (html / jsx / svg / mermaid, plus tag-less
+ * fences whose body obviously contains HTML or SVG) is replaced with a
+ * compact placeholder of the form `[[DESIGNBLOCK:<fmt>:<bodyLen>]]`. An
+ * unclosed trailing fence — which is what we see mid-stream before the
+ * closing backticks arrive, or when the model dies with a network error —
+ * becomes `[[DESIGNBLOCK_PARTIAL:<fmt>:<bodyLen>]]`.
+ *
+ * MessageList renders these placeholders as a one-line chip pointing the
+ * user at the right-hand canvas, so the chat thread doesn't double up the
+ * 200-line HTML the canvas already shows.
+ *
+ * Non-design fences (```bash, ```json, etc.) are left untouched — design
+ * mode messages occasionally include those for prose context and we want
+ * them to render as normal markdown code blocks.
+ */
+export function collapseDesignBlocks(content: string): string {
+  const FENCE = /```([a-zA-Z0-9_+-]*)\s*\n([\s\S]*?)```/g;
+  let out = '';
+  let lastIdx = 0;
+  let m: RegExpExecArray | null;
+  FENCE.lastIndex = 0;
+  while ((m = FENCE.exec(content)) !== null) {
+    out += content.slice(lastIdx, m.index);
+    const lang = (m[1] || '').toLowerCase();
+    const body = m[2];
+    const fmt = normaliseFormat(lang, body);
+    if (fmt) {
+      // Trim before measuring so the chip's size hint reflects the actual
+      // payload, not the trailing newline that the fence regex always
+      // includes between the body and the closing backticks.
+      out += `[[DESIGNBLOCK:${fmt}:${body.trim().length}]]`;
+    } else {
+      out += m[0];
+    }
+    lastIdx = m.index + m[0].length;
+  }
+
+  // Trailing unclosed fence — mid-stream, or stream died before the closer
+  // landed. Detect by scanning for a stray ``` after the last closed fence.
+  const tail = content.slice(lastIdx);
+  const openIdx = tail.indexOf('```');
+  if (openIdx < 0) {
+    return out + tail;
+  }
+  const before = tail.slice(0, openIdx);
+  const after = tail.slice(openIdx + 3);
+  const nl = after.indexOf('\n');
+  const headerLang = (nl >= 0 ? after.slice(0, nl) : after).trim().toLowerCase();
+  const body = nl >= 0 ? after.slice(nl + 1) : '';
+
+  let fmt: DesignFormat | null = null;
+  if (DESIGN_FENCE_LANGS.has(headerLang)) {
+    fmt = langToFormat(headerLang);
+  } else if (!headerLang) {
+    // Empty lang tag — fall back to body sniffing (same logic as the
+    // closed-fence path so behaviour is consistent).
+    const head = body.trim().slice(0, 60).toLowerCase();
+    if (head.startsWith('<!doctype') || head.startsWith('<html')) fmt = 'html';
+    else if (head.startsWith('<svg')) fmt = 'svg';
+  }
+
+  if (fmt) {
+    // No closing fence yet, so `body` is whatever's been streamed so far.
+    // We don't trim here — we want the chip to grow visibly as more bytes
+    // arrive, even if the trailing whitespace is just a half-rendered
+    // newline from the model's last token.
+    return out + before + `[[DESIGNBLOCK_PARTIAL:${fmt}:${body.length}]]`;
+  }
+  // Unknown lang — leave the raw fence in place so non-design content still
+  // shows up correctly in the chat (e.g. an open ```bash that hasn't closed).
+  return out + tail;
+}
+
+/**
  * Extract the *first* design block from a single assistant message.
  * Used to figure out whether a given turn produced renderable output.
  */

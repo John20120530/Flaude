@@ -18,6 +18,7 @@ import type { Conversation, Message } from '@/types';
 import {
   allDesignBlocks,
   buildDesignDocument,
+  collapseDesignBlocks,
   extractDesignFromMessage,
   latestDesignBlock,
 } from './designExtract';
@@ -211,5 +212,95 @@ describe('buildDesignDocument', () => {
     const doc = buildDesignDocument(block);
     expect(doc).not.toContain('html2canvas');
     expect(doc).not.toContain('flaude-capture');
+  });
+});
+
+// ---- collapseDesignBlocks -------------------------------------------------
+//
+// This is what keeps DesignView's chat thread from doubling up the canvas.
+// Every closed design fence becomes [[DESIGNBLOCK:fmt:bytes]]; an unclosed
+// trailing fence (mid-stream or errored stream) becomes
+// [[DESIGNBLOCK_PARTIAL:fmt:bytes]]. Non-design fences pass through.
+
+describe('collapseDesignBlocks', () => {
+  it('replaces a closed html fence with a placeholder including byte length', () => {
+    const body = '<!doctype html><html></html>';
+    const out = collapseDesignBlocks('here you go:\n```html\n' + body + '\n```\n');
+    expect(out).toBe('here you go:\n[[DESIGNBLOCK:html:' + body.length + ']]\n');
+  });
+
+  it('replaces jsx / tsx / react fences as the same "jsx" format', () => {
+    for (const tag of ['jsx', 'tsx', 'react']) {
+      const out = collapseDesignBlocks('```' + tag + '\nfunction App(){}\n```');
+      expect(out).toContain('[[DESIGNBLOCK:jsx:');
+    }
+  });
+
+  it('replaces svg + mermaid fences', () => {
+    expect(collapseDesignBlocks('```svg\n<svg/>\n```')).toContain('[[DESIGNBLOCK:svg:');
+    expect(collapseDesignBlocks('```mermaid\ngraph TD\n```')).toContain(
+      '[[DESIGNBLOCK:mermaid:'
+    );
+  });
+
+  it('infers html / svg from body when the model dropped the language tag', () => {
+    expect(collapseDesignBlocks('```\n<!doctype html><html></html>\n```')).toContain(
+      '[[DESIGNBLOCK:html:'
+    );
+    expect(collapseDesignBlocks('```\n<svg width="10"/>\n```')).toContain(
+      '[[DESIGNBLOCK:svg:'
+    );
+  });
+
+  it('leaves non-design fences alone (```python, ```bash, etc.)', () => {
+    const input = '```python\nprint(1)\n```';
+    expect(collapseDesignBlocks(input)).toBe(input);
+    const input2 = '```bash\nls -la\n```';
+    expect(collapseDesignBlocks(input2)).toBe(input2);
+  });
+
+  it('keeps surrounding prose intact', () => {
+    const out = collapseDesignBlocks(
+      '这是你要的海报：\n\n```html\n<!doctype html><body/>\n```\n\n如需调整，告诉我哪里。'
+    );
+    expect(out).toMatch(/^这是你要的海报：\n\n\[\[DESIGNBLOCK:html:\d+\]\]\n\n如需调整/);
+  });
+
+  it('replaces an unclosed trailing fence with DESIGNBLOCK_PARTIAL (mid-stream)', () => {
+    // What the chat sees while the model is mid-emit, or after a network
+    // error killed the stream before the closing ``` arrived.
+    const partial = '生成中...\n```html\n<!doctype html><html><body><h1>Hi';
+    const out = collapseDesignBlocks(partial);
+    expect(out).toContain('[[DESIGNBLOCK_PARTIAL:html:');
+    expect(out.startsWith('生成中...\n')).toBe(true);
+    // The raw body is gone — that's the whole point.
+    expect(out).not.toContain('<!doctype');
+    expect(out).not.toContain('<h1>');
+  });
+
+  it('infers format on a partial fence with no language tag', () => {
+    const out = collapseDesignBlocks('```\n<!doctype html><html');
+    expect(out).toContain('[[DESIGNBLOCK_PARTIAL:html:');
+  });
+
+  it('leaves an unclosed non-design trailing fence alone', () => {
+    const input = '```bash\nls -la';
+    expect(collapseDesignBlocks(input)).toBe(input);
+  });
+
+  it('handles mixed closed + trailing partial in the same message', () => {
+    // Rare but legal — model emitted v1 fully, then started v2 and the
+    // stream cut. Both should fold.
+    const out = collapseDesignBlocks(
+      '```html\n<!doctype html><html></html>\n```\n现在再试一版：\n```html\n<!doctype html><html><body><div'
+    );
+    expect(out).toContain('[[DESIGNBLOCK:html:');
+    expect(out).toContain('[[DESIGNBLOCK_PARTIAL:html:');
+    expect(out).toContain('现在再试一版：');
+  });
+
+  it('passes content through untouched when no fences are present', () => {
+    const input = '我建议用 Tailwind 配 stone 色板，更显高级。';
+    expect(collapseDesignBlocks(input)).toBe(input);
   });
 });

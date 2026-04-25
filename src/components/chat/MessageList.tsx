@@ -12,6 +12,7 @@ import MessageActions from './MessageActions';
 import CodeBlock from './CodeBlock';
 import ToolCallCard from './ToolCallCard';
 import { useAppStore } from '@/store/useAppStore';
+import { collapseDesignBlocks, type DesignFormat } from '@/lib/designExtract';
 
 interface Props {
   messages: Message[];
@@ -29,6 +30,14 @@ interface Props {
   summarizedAt?: number;
   /** Invoked when the user clicks "撤销" on the summary chip. */
   onClearSummary?: () => void;
+  /**
+   * Design mode only: hide raw design fences (```html / ```jsx / ```svg /
+   * ```mermaid) from the chat thread, replacing each with a compact chip
+   * that points the user at the right-hand canvas. The canvas already
+   * renders the same body, so showing the 200-line HTML inline doubles the
+   * noise for no value. Set to true from `DesignView`.
+   */
+  hideDesignBlocks?: boolean;
 }
 
 export default function MessageList({
@@ -40,6 +49,7 @@ export default function MessageList({
   summaryMessageCount,
   summarizedAt,
   onClearSummary,
+  hideDesignBlocks,
 }: Props) {
   const endRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -242,6 +252,7 @@ export default function MessageList({
       streaming={streaming && m === lastVisibleMessage}
       flashing={flashId === m.id}
       archived={opts.archived}
+      hideDesignBlocks={hideDesignBlocks}
     />
   );
 
@@ -293,6 +304,8 @@ interface ItemProps {
    * at a glance "this isn't in the live context anymore."
    */
   archived?: boolean;
+  /** Design mode: collapse design fences into chips. See Props.hideDesignBlocks. */
+  hideDesignBlocks?: boolean;
 }
 
 function MessageItem({
@@ -303,6 +316,7 @@ function MessageItem({
   streaming,
   flashing,
   archived,
+  hideDesignBlocks,
 }: ItemProps) {
   const isUser = message.role === 'user';
   const [editing, setEditing] = useState(false);
@@ -319,8 +333,18 @@ function MessageItem({
     setEditing(false);
   };
 
-  // Split rendered content at [[ARTIFACT:id]] tokens so we can embed cards inline.
-  const segments = splitWithArtifacts(message.content);
+  // In design mode, fold design fences into compact chips before splitting.
+  // The canvas on the right is the real renderer; doubling the body inline
+  // would just be noise (and on a partial / errored stream, a giant scrolling
+  // wall of half-rendered HTML). Non-assistant messages and non-design
+  // fences pass through untouched.
+  const displayContent =
+    hideDesignBlocks && message.role === 'assistant'
+      ? collapseDesignBlocks(message.content)
+      : message.content;
+  // Split rendered content at [[ARTIFACT:id]] / [[DESIGNBLOCK:...]] tokens so
+  // we can embed cards or chips inline.
+  const segments = splitWithArtifacts(displayContent);
 
   return (
     <div
@@ -420,26 +444,45 @@ function MessageItem({
             </div>
           ) : (
             <div className="prose prose-sm dark:prose-invert max-w-none prose-pre:my-0 prose-pre:p-0 prose-pre:bg-transparent prose-code:before:content-none prose-code:after:content-none prose-p:my-2 prose-ul:my-2 prose-ol:my-2">
-              {segments.map((seg, i) =>
-                seg.kind === 'text' ? (
-                  <ReactMarkdown
-                    key={i}
-                    remarkPlugins={[remarkGfm, remarkMath]}
-                    rehypePlugins={[rehypeHighlight, rehypeKatex]}
-                    components={{ pre: CodeBlock }}
-                  >
-                    {seg.content || (message.role === 'assistant' && !streaming ? '' : '…')}
-                  </ReactMarkdown>
-                ) : seg.id ? (
-                  <ArtifactCard
-                    key={i}
-                    artifactId={seg.id}
-                    artifact={artifacts[seg.id]}
-                    streaming={streaming}
-                    onOpen={() => setActiveArtifact(seg.id!)}
-                  />
-                ) : null
-              )}
+              {segments.map((seg, i) => {
+                if (seg.kind === 'text') {
+                  return (
+                    <ReactMarkdown
+                      key={i}
+                      remarkPlugins={[remarkGfm, remarkMath]}
+                      rehypePlugins={[rehypeHighlight, rehypeKatex]}
+                      components={{ pre: CodeBlock }}
+                    >
+                      {seg.content || (message.role === 'assistant' && !streaming ? '' : '…')}
+                    </ReactMarkdown>
+                  );
+                }
+                if (seg.kind === 'artifact' && seg.id) {
+                  return (
+                    <ArtifactCard
+                      key={i}
+                      artifactId={seg.id}
+                      artifact={artifacts[seg.id]}
+                      streaming={streaming}
+                      onOpen={() => setActiveArtifact(seg.id!)}
+                    />
+                  );
+                }
+                if (
+                  (seg.kind === 'designblock' || seg.kind === 'designblock_partial') &&
+                  seg.format
+                ) {
+                  return (
+                    <DesignBlockChip
+                      key={i}
+                      format={seg.format}
+                      byteSize={seg.byteSize ?? 0}
+                      partial={seg.kind === 'designblock_partial'}
+                    />
+                  );
+                }
+                return null;
+              })}
             </div>
           )}
 
@@ -660,26 +703,101 @@ function unwrapSpan(span: HTMLElement) {
 }
 
 interface Segment {
-  kind: 'text' | 'artifact';
+  kind: 'text' | 'artifact' | 'designblock' | 'designblock_partial';
   content?: string;
   id?: string;
+  format?: DesignFormat;
+  byteSize?: number;
 }
 
 function splitWithArtifacts(raw: string): Segment[] {
   const out: Segment[] = [];
-  const re = /\[\[ARTIFACT:([^\]]+)\]\]/g;
+  // Recognise three placeholder shapes:
+  //   [[ARTIFACT:<id>]]                   – Chat / Code mode artifacts
+  //   [[DESIGNBLOCK:<fmt>:<bytes>]]       – Design mode, closed fence
+  //   [[DESIGNBLOCK_PARTIAL:<fmt>:<bytes>]] – Design mode, mid-stream / errored
+  const re = /\[\[(ARTIFACT|DESIGNBLOCK|DESIGNBLOCK_PARTIAL):([^\]]+)\]\]/g;
   let lastIdx = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(raw)) !== null) {
     if (m.index > lastIdx) {
       out.push({ kind: 'text', content: raw.slice(lastIdx, m.index) });
     }
-    out.push({ kind: 'artifact', id: m[1] });
+    const tag = m[1];
+    if (tag === 'ARTIFACT') {
+      out.push({ kind: 'artifact', id: m[2] });
+    } else {
+      const [fmtRaw, sizeRaw] = m[2].split(':');
+      const format = (fmtRaw as DesignFormat) || 'html';
+      const byteSize = Number.parseInt(sizeRaw ?? '0', 10) || 0;
+      out.push({
+        kind: tag === 'DESIGNBLOCK' ? 'designblock' : 'designblock_partial',
+        format,
+        byteSize,
+      });
+    }
     lastIdx = m.index + m[0].length;
   }
   if (lastIdx < raw.length) out.push({ kind: 'text', content: raw.slice(lastIdx) });
   if (out.length === 0) out.push({ kind: 'text', content: raw });
   return out;
+}
+
+/**
+ * One-line chip standing in for a hidden design fence in the chat thread.
+ *
+ * Two visual states:
+ *   1. **Closed** — the fence terminated cleanly. The chip says "已生成
+ *      设计稿 · HTML · 12.3 KB · 见右侧画布", styled muted (this is a
+ *      pointer, not a primary action).
+ *   2. **Partial** — the fence opened but never closed (mid-stream, or stream
+ *      died before the closer arrived). The chip uses the accent color +
+ *      spinner so the user can tell at a glance that something's still in
+ *      flight, or that the run errored mid-design (the streaming hook
+ *      already appends a "> ⚠ 错误：…" line below).
+ */
+function DesignBlockChip({
+  format,
+  byteSize,
+  partial,
+}: {
+  format: DesignFormat;
+  byteSize: number;
+  partial: boolean;
+}) {
+  // Show KB once we cross the 1k mark — "12345 字" reads worse than "12.1 KB"
+  // for a wall of HTML the user is never going to count by hand.
+  const sizeLabel =
+    byteSize >= 1024
+      ? `${(byteSize / 1024).toFixed(1)} KB`
+      : `${byteSize} 字`;
+  const label = partial ? '正在生成设计稿' : '已生成设计稿';
+  const tail = partial ? '' : ' · 见右侧画布';
+  return (
+    <div
+      className={cn(
+        'my-2 inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs not-prose',
+        partial
+          ? 'border-claude-accent/30 bg-claude-accent/5 text-claude-accent'
+          : 'border-claude-border dark:border-night-border bg-claude-surface dark:bg-night-surface text-claude-muted dark:text-night-muted'
+      )}
+      title={
+        partial
+          ? '设计稿正在流式生成；右侧画布会在结束后展示完整版本。'
+          : '此条助手消息生成的设计稿已渲染到右侧画布；可在画布上方下载或翻看历史版本。'
+      }
+    >
+      {partial ? (
+        <Loader2 className="w-3 h-3 animate-spin" />
+      ) : (
+        <Sparkles className="w-3 h-3" />
+      )}
+      <span>
+        {label} · {format.toUpperCase()} · {sizeLabel}
+        {tail}
+      </span>
+    </div>
+  );
 }
 
 /**

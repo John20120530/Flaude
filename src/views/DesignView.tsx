@@ -162,6 +162,12 @@ export default function DesignView() {
           summaryMessageCount={conversation.summaryMessageCount}
           summarizedAt={conversation.summarizedAt}
           onClearSummary={() => setConversationSummary(conversation.id, undefined, undefined)}
+          // Design mode: keep the chat column readable. The right-hand canvas
+          // already renders the full HTML; doubling it inline (especially on
+          // a 200-line palette/poster page) buries the user's prompt + any
+          // model commentary under a wall of source. We replace each design
+          // fence with a one-line "已生成设计稿 · 见右侧画布" chip.
+          hideDesignBlocks
         />
         <Composer
           onSend={chat.send}
