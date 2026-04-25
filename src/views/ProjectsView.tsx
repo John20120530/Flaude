@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   FolderKanban,
@@ -23,6 +23,13 @@ export default function ProjectsView() {
   const [showDialog, setShowDialog] = useState(false);
   const [newName, setNewName] = useState('');
   const [newDesc, setNewDesc] = useState('');
+  // Track whether the mousedown that started this click landed on the
+  // backdrop itself. Without this, drag-selecting text inside the inputs
+  // and releasing the mouse outside the card dispatches a `click` whose
+  // target is the backdrop — silently dismissing the modal and wiping
+  // half-filled forms (same pattern AdminView's ModalShell guards against).
+  // Close only when both press and release happened on the backdrop.
+  const mouseDownOnBackdrop = useRef(false);
 
   const activeProject = useMemo(
     () => projects.find((p) => p.id === projectId),
@@ -97,11 +104,18 @@ export default function ProjectsView() {
         {showDialog && (
           <div
             className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 animate-fade-in"
-            onClick={() => setShowDialog(false)}
+            onMouseDown={(e) => {
+              mouseDownOnBackdrop.current = e.target === e.currentTarget;
+            }}
+            onClick={(e) => {
+              if (e.target === e.currentTarget && mouseDownOnBackdrop.current) {
+                setShowDialog(false);
+              }
+              mouseDownOnBackdrop.current = false;
+            }}
           >
             <div
               className="w-full max-w-md rounded-2xl bg-claude-bg dark:bg-night-bg border border-claude-border dark:border-night-border p-5 shadow-xl"
-              onClick={(e) => e.stopPropagation()}
             >
               <h2 className="text-lg font-semibold mb-4">新建项目</h2>
               <div className="space-y-3">
