@@ -629,7 +629,7 @@ function SkillsSection() {
   const [adding, setAdding] = useState(false);
 
   const grouped = useMemo(() => {
-    const byMode: Record<WorkMode | 'all', Skill[]> = { chat: [], code: [], all: [] };
+    const byMode: Record<WorkMode | 'all', Skill[]> = { chat: [], code: [], design: [], all: [] };
     for (const sk of skills) {
       if (sk.modes.length === 0) {
         byMode.all.push(sk);

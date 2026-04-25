@@ -9,6 +9,7 @@ import {
   estimateTokens,
 } from '@/lib/tokenEstimate';
 import { summarizeConversation } from '@/lib/conversationSummary';
+import { DESIGN_VISION_FALLBACK_MODEL } from '@/config/providers';
 import type {
   Attachment,
   Conversation,
@@ -17,6 +18,35 @@ import type {
   ToolCall,
 } from '@/types';
 import type { ArtifactType } from '@/lib/artifacts';
+
+/**
+ * Decide whether this turn should be routed through a vision-capable model
+ * instead of the conversation's default. Currently only Design mode opts in:
+ *   - V4 Pro / V4 Flash can't see images,
+ *   - if the user attached one, the only sensible response is to read the
+ *     image, so we silently route just that turn through Qwen-Max.
+ *
+ * Returns the override modelId, or `undefined` to use the conversation's
+ * stored modelId.
+ */
+function pickModelOverride(
+  mode: Conversation['mode'],
+  currentModelId: string,
+  attachments: Attachment[]
+): string | undefined {
+  if (mode !== 'design') return undefined;
+  const hasImage = attachments.some((a) =>
+    typeof a.mimeType === 'string' && a.mimeType.startsWith('image/')
+  );
+  if (!hasImage) return undefined;
+  // Already on a vision-capable model? Don't bounce to a different one — if
+  // the user manually picked Qwen / GLM-4 they presumably wanted it.
+  if (currentModelId === DESIGN_VISION_FALLBACK_MODEL) return undefined;
+  if (currentModelId.startsWith('qwen-') || currentModelId.startsWith('glm-')) {
+    return undefined;
+  }
+  return DESIGN_VISION_FALLBACK_MODEL;
+}
 
 interface Options {
   conversation: Conversation;
@@ -126,10 +156,19 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
       assistantMsgId: string,
       controller: AbortController,
       effectiveSystem: string | undefined,
+      modelOverride: string | undefined,
       depth = 0
     ): Promise<void> => {
       const mode = conversation.mode;
       const tools = toolsForMode(mode);
+      // `modelOverride` lets the caller route a single turn through a
+      // different model than the conversation's stored modelId — used by
+      // Design mode to auto-fall-back to a vision-capable model when the
+      // user attaches an image. We pass it down through tool round-trips
+      // so the whole turn (initial reply + any tool follow-ups) stays on
+      // the same model; otherwise mid-turn we'd switch back and the
+      // model context would shift.
+      const effectiveModelId = modelOverride ?? conversation.modelId;
 
       let accumulated = '';
       let reasoning = '';
@@ -137,7 +176,7 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
       let finishReason: string | undefined;
 
       for await (const chunk of streamChat({
-        modelId: conversation.modelId,
+        modelId: effectiveModelId,
         messages: history,
         system: effectiveSystem,
         tools: tools.length > 0 ? tools : undefined,
@@ -209,7 +248,7 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
         content: accumulated, // raw; serializeMessages will still ship it
         toolCalls,
         createdAt: Date.now(),
-        modelId: conversation.modelId,
+        modelId: effectiveModelId,
       };
       const newHistory: Message[] = [...history, assistantTurn];
 
@@ -269,10 +308,17 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
         role: 'assistant',
         content: '',
         createdAt: Date.now(),
-        modelId: conversation.modelId,
+        modelId: effectiveModelId,
       });
 
-      await runStream(newHistory, nextAssistantId, controller, effectiveSystem, depth + 1);
+      await runStream(
+        newHistory,
+        nextAssistantId,
+        controller,
+        effectiveSystem,
+        modelOverride,
+        depth + 1
+      );
     },
     [
       conversation.id,
@@ -291,13 +337,21 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
     async (
       history: Message[],
       assistantMsgId: string,
-      effectiveSystem: string | undefined
+      effectiveSystem: string | undefined,
+      modelOverride?: string
     ) => {
       const controller = new AbortController();
       abortRef.current = controller;
       setStreaming(true);
       try {
-        await runStream(history, assistantMsgId, controller, effectiveSystem, 0);
+        await runStream(
+          history,
+          assistantMsgId,
+          controller,
+          effectiveSystem,
+          modelOverride,
+          0
+        );
       } catch (err) {
         if ((err as Error).name !== 'AbortError') {
           patchLastMessage(conversation.id, {
@@ -428,6 +482,16 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
           .getState()
           .conversations.find((c) => c.id === conversation.id) ?? conversation;
 
+      // Per-turn vision routing: Design mode auto-bounces a single turn to a
+      // vision-capable model when there's an image attached. The conversation's
+      // stored modelId stays untouched, so the next text-only turn returns to
+      // V4 Pro automatically. See pickModelOverride() for the policy.
+      const modelOverride = pickModelOverride(
+        conversation.mode,
+        conversation.modelId,
+        attachments
+      );
+
       const userMsg: Message = {
         id: uid('msg'),
         role: 'user',
@@ -442,7 +506,7 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
         role: 'assistant',
         content: '',
         createdAt: Date.now(),
-        modelId: conversation.modelId,
+        modelId: modelOverride ?? conversation.modelId,
       };
       appendMessage(conversation.id, assistantMsg);
 
@@ -456,7 +520,7 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
       ];
       const fullSystem = composeSystemWithSummary(systemPrompt, current.summary);
 
-      await runTurn(historyToSend, assistantMsg.id, fullSystem);
+      await runTurn(historyToSend, assistantMsg.id, fullSystem, modelOverride);
     },
     [
       conversation,
@@ -503,7 +567,22 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
     const skip = Math.min(current.summaryMessageCount ?? 0, cutIdx);
     const history = msgs.slice(skip, cutIdx);
     const fullSystem = composeSystemWithSummary(systemPrompt, current.summary);
-    await runTurn(history, target.id, fullSystem);
+
+    // Re-evaluate vision routing on regenerate: if the immediately-preceding
+    // user message carried an image, we still want Qwen-Max even on the
+    // re-roll. Walk back from cutIdx to find the most recent user message
+    // (skipping any tool messages that may sit between).
+    let userIdx = cutIdx - 1;
+    while (userIdx >= 0 && msgs[userIdx].role !== 'user') userIdx--;
+    const lastUserAttachments =
+      userIdx >= 0 ? msgs[userIdx].attachments ?? [] : [];
+    const modelOverride = pickModelOverride(
+      conversation.mode,
+      conversation.modelId,
+      lastUserAttachments
+    );
+
+    await runTurn(history, target.id, fullSystem, modelOverride);
   }, [
     conversation,
     streaming,

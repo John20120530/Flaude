@@ -3,6 +3,7 @@ import {
   MessageSquare,
   Code2,
   FolderKanban,
+  Palette,
   Settings,
   Shield,
   Plus,
@@ -30,9 +31,14 @@ import type { Conversation, WorkMode } from '@/types';
 import { useMemo, useRef, useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 
+// Order in this object literal is the order they render in the sidebar —
+// Chat → Code → Design — keep most-used at the top so muscle memory is
+// stable. Object.keys() in modern engines preserves insertion order for
+// string keys, which is what the render loop depends on.
 const MODE_LABELS: Record<WorkMode, { label: string; icon: typeof MessageSquare }> = {
   chat: { label: 'Chat', icon: MessageSquare },
   code: { label: 'Code', icon: Code2 },
+  design: { label: 'Design', icon: Palette },
 };
 
 export default function Sidebar() {

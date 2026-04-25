@@ -1,6 +1,6 @@
 /** Shared domain types for Flaude. */
 
-export type WorkMode = 'chat' | 'code';
+export type WorkMode = 'chat' | 'code' | 'design';
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 

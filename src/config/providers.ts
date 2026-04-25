@@ -168,10 +168,29 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = [
 ];
 
 /** Default model picks per mode — used when user has not overridden. */
-export const DEFAULT_MODEL_BY_MODE: Record<'chat' | 'code', string> = {
+export const DEFAULT_MODEL_BY_MODE: Record<'chat' | 'code' | 'design', string> = {
   chat: 'deepseek-chat',
   code: 'deepseek-chat',
+  // Design mode produces UI code (HTML/Tailwind/JSX/SVG); V4 Pro generates
+  // noticeably more polished and complete designs than Flash, and the visual
+  // quality difference dwarfs the token-cost difference for this use case.
+  // Users who want to save tokens can manually flip to deepseek-chat (Flash);
+  // we surface that hint via UI in DesignView.
+  design: 'deepseek-v4-pro',
 };
+
+/**
+ * Vision-capable model used as a fallback when a Design-mode message has
+ * image attachments. V4 Pro can't see images; Qwen-Max can. We auto-route
+ * just that single turn through Qwen-Max and bounce back to V4 Pro on the
+ * next text-only turn — the user gets screenshot-redesign for free, with
+ * no manual model switching.
+ *
+ * Picked Qwen-Max over GLM-4 Plus because Qwen's vision pipeline is more
+ * mature on DashScope and the OpenAI-compat surface handles `image_url`
+ * parts cleanly without provider-specific parameter shimming.
+ */
+export const DESIGN_VISION_FALLBACK_MODEL = 'qwen-max';
 
 /**
  * Models that come in "base ↔ reasoner" pairs — same family, non-thinking vs

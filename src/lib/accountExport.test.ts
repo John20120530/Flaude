@@ -178,7 +178,7 @@ describe('buildAccountBundle content', () => {
     useAppStore.setState({
       theme: 'dark',
       activeMode: 'code',
-      modelByMode: { chat: 'x', code: 'y' },
+      modelByMode: { chat: 'x', code: 'y', design: 'z' },
       sidebarOpen: false,
       artifactsPanelWidth: 600,
       globalMemory: 'remember stuff',
@@ -199,7 +199,7 @@ describe('buildAccountBundle content', () => {
     const b = buildAccountBundle();
     expect(b.settings.theme).toBe('dark');
     expect(b.settings.activeMode).toBe('code');
-    expect(b.settings.modelByMode).toEqual({ chat: 'x', code: 'y' });
+    expect(b.settings.modelByMode).toEqual({ chat: 'x', code: 'y', design: 'z' });
     expect(b.settings.sidebarOpen).toBe(false);
     expect(b.settings.artifactsPanelWidth).toBe(600);
     expect(b.settings.globalMemory).toBe('remember stuff');

@@ -4,6 +4,7 @@ import { useAppStore } from '@/store/useAppStore';
 import AppShell from '@/components/shell/AppShell';
 import ChatView from '@/views/ChatView';
 import CodeView from '@/views/CodeView';
+import DesignView from '@/views/DesignView';
 import SettingsView from '@/views/SettingsView';
 import ProjectsView from '@/views/ProjectsView';
 import LoginView from '@/views/LoginView';
@@ -63,6 +64,8 @@ export default function App() {
         <Route path="/cowork/:conversationId" element={<Navigate to="/chat" replace />} />
         <Route path="/code" element={<CodeView />} />
         <Route path="/code/:conversationId" element={<CodeView />} />
+        <Route path="/design" element={<DesignView />} />
+        <Route path="/design/:conversationId" element={<DesignView />} />
         <Route path="/projects" element={<ProjectsView />} />
         <Route path="/projects/:projectId" element={<ProjectsView />} />
         <Route path="/settings" element={<SettingsView />} />

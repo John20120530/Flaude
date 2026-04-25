@@ -863,7 +863,7 @@ describe('clearAuth', () => {
       sidebarOpen: false,
       artifactsPanelWidth: 600,
       activeMode: 'code',
-      modelByMode: { chat: 'x', code: 'y' },
+      modelByMode: { chat: 'x', code: 'y', design: 'z' },
       workspacePath: 'C:/ws',
       allowFileWrites: true,
       allowShellExec: true,
@@ -876,7 +876,7 @@ describe('clearAuth', () => {
     expect(s.sidebarOpen).toBe(false);
     expect(s.artifactsPanelWidth).toBe(600);
     expect(s.activeMode).toBe('code');
-    expect(s.modelByMode).toEqual({ chat: 'x', code: 'y' });
+    expect(s.modelByMode).toEqual({ chat: 'x', code: 'y', design: 'z' });
     expect(s.workspacePath).toBe('C:/ws');
     expect(s.allowFileWrites).toBe(true);
     expect(s.allowShellExec).toBe(true);
