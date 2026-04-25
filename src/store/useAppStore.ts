@@ -462,7 +462,13 @@ export const useAppStore = create<AppState>()(
       // Conversations
       newConversation: (mode, projectId) => {
         const activeMode = mode ?? get().activeMode;
-        const modelId = get().modelByMode[activeMode];
+        // Fallback to DEFAULT_MODEL_BY_MODE if the per-mode pick is missing.
+        // This is belt-and-suspenders alongside the rehydrate-time backfill —
+        // covers e.g. importing an old account bundle whose settings.modelByMode
+        // predates a newly-added mode. Sending an undefined model to streamChat
+        // produces "model is required" 400s with no recovery path.
+        const modelId =
+          get().modelByMode[activeMode] ?? DEFAULT_MODEL_BY_MODE[activeMode];
         const id = uid('conv');
         const now = Date.now();
         const conv: Conversation = {
@@ -1626,6 +1632,36 @@ export const useAppStore = create<AppState>()(
         if (mbm && 'cowork' in mbm) {
           delete mbm.cowork;
         }
+        // Backfill any modes added after the user's last persisted snapshot.
+        // Without this, a v0.1.8 user (modelByMode = {chat, code}) upgrading to
+        // v0.1.9 has no `design` key — newConversation('design') then creates a
+        // conv with modelId=undefined, the chat request goes out with no model
+        // field, and the server rejects with 400 "model is required" while the
+        // TopBar misleadingly shows the V4 Pro label (its <select> value falls
+        // back to the first option when bound to undefined). Merge keys in
+        // place so the same fix flows to TopBar, newConversation, and every
+        // other reader. We only fill *missing* keys — never overwrite a user's
+        // explicit pick on a mode they've already configured.
+        if (state.modelByMode && typeof state.modelByMode === 'object') {
+          const filled = state.modelByMode as Record<string, string>;
+          for (const [k, v] of Object.entries(DEFAULT_MODEL_BY_MODE)) {
+            if (!filled[k]) filled[k] = v;
+          }
+        } else {
+          state.modelByMode = { ...DEFAULT_MODEL_BY_MODE };
+        }
+        // Heal any conversation rows whose modelId was lost — typically from
+        // the same upgrade path: created on a build that added a new mode
+        // before the rehydrate-backfill above existed, so newConversation
+        // stamped them with modelId=undefined. Rather than make the user
+        // delete-and-recreate, retroactively assign the per-mode default. The
+        // user can still re-pick from the TopBar; this only matters for the
+        // *first* send where the request would otherwise 400.
+        state.conversations = state.conversations.map((c) =>
+          c.modelId
+            ? c
+            : { ...c, modelId: state.modelByMode[c.mode] ?? DEFAULT_MODEL_BY_MODE[c.mode] }
+        );
         // Also scrub any `'cowork'` entries from skill.modes[] — otherwise
         // SettingsView's byMode[m].push(sk) hits an undefined bucket and
         // the whole Settings pane white-screens.

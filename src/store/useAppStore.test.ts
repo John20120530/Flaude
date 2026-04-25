@@ -113,6 +113,20 @@ describe('newConversation', () => {
     expect(s.activeMode).toBe('code');
     expect(s.conversations[0].mode).toBe('code');
   });
+
+  it('falls back to DEFAULT_MODEL_BY_MODE when modelByMode lacks the requested mode', () => {
+    // Repro for the v0.1.9 "model is required" bug: a v0.1.8 user upgrades, the
+    // persisted modelByMode lacks the design key, and newConversation('design')
+    // would otherwise stamp modelId=undefined and cause the next send to 400.
+    // Simulate the upgrade state by deleting the design key from modelByMode.
+    useAppStore.setState({
+      modelByMode: { chat: 'deepseek-chat', code: 'deepseek-chat' } as unknown as
+        ReturnType<typeof useAppStore.getState>['modelByMode'],
+    });
+    useAppStore.getState().newConversation('design');
+    const s = useAppStore.getState();
+    expect(s.conversations[0].modelId).toBe('deepseek-v4-pro');
+  });
 });
 
 describe('appendMessage', () => {
