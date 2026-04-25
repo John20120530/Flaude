@@ -175,6 +175,20 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
       const toolCallsMap = new Map<string, ToolCall>();
       let finishReason: string | undefined;
 
+      // Design mode skips the artifact pipeline entirely. The DesignCanvas
+      // is the dedicated render surface for ```html / ```jsx / ```svg /
+      // ```mermaid blocks, and `extractDesignFromMessage` reads them from
+      // the *raw* message content. If we let parseMessage promote those
+      // fenced blocks into artifacts, two things break simultaneously:
+      //   (1) the artifact lifts the fenced block out and replaces it with
+      //       `[[ARTIFACT:id]]` in message.content — so designExtract sees
+      //       no fenced block and DesignCanvas shows the empty state,
+      //   (2) the Artifacts panel pops out unprompted in Design mode,
+      //       duplicating the canvas with mismatched UX (different toolbar,
+      //       no breakpoint switcher, no version stepper).
+      // Skipping parseMessage for design mode keeps message.content raw,
+      // which is exactly what designExtract expects.
+      const isDesignMode = conversation.mode === 'design';
       for await (const chunk of streamChat({
         modelId: effectiveModelId,
         messages: history,
@@ -184,9 +198,13 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
       })) {
         if (chunk.delta) {
           accumulated += chunk.delta;
-          const parsed = parseMessage(accumulated, assistantMsgId);
-          patchLastMessage(conversation.id, { content: parsed.cleanContent });
-          for (const art of parsed.artifacts) upsertArtifact(art);
+          if (isDesignMode) {
+            patchLastMessage(conversation.id, { content: accumulated });
+          } else {
+            const parsed = parseMessage(accumulated, assistantMsgId);
+            patchLastMessage(conversation.id, { content: parsed.cleanContent });
+            for (const art of parsed.artifacts) upsertArtifact(art);
+          }
         }
         if (chunk.reasoningDelta) {
           reasoning += chunk.reasoningDelta;
@@ -210,10 +228,19 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
           });
         }
         if (chunk.finish === 'error' && chunk.error) {
-          const parsed = parseMessage(accumulated, assistantMsgId);
-          patchLastMessage(conversation.id, {
-            content: parsed.cleanContent + `\n\n> ⚠ 错误：${chunk.error}`,
-          });
+          // Same isDesignMode bypass as above — error append shouldn't trip
+          // the artifact pipeline either, otherwise a partial fenced block
+          // emitted before the error gets stolen by Artifacts.
+          if (isDesignMode) {
+            patchLastMessage(conversation.id, {
+              content: accumulated + `\n\n> ⚠ 错误：${chunk.error}`,
+            });
+          } else {
+            const parsed = parseMessage(accumulated, assistantMsgId);
+            patchLastMessage(conversation.id, {
+              content: parsed.cleanContent + `\n\n> ⚠ 错误：${chunk.error}`,
+            });
+          }
         }
         if (chunk.finish) {
           finishReason = chunk.finish;
