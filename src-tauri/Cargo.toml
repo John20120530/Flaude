@@ -1,6 +1,6 @@
 [package]
 name = "flaude-app"
-version = "0.1.15"
+version = "0.1.16"
 description = "Flaude — a Claude-like desktop client for Chinese open-source LLMs"
 edition = "2021"
 rust-version = "1.77"
@@ -49,6 +49,35 @@ tokio = { version = "1", features = [
 # events — that's what turns the Terminal tab into a real interactive shell
 # instead of the one-shot `shell_exec` tool the Agent uses.
 portable-pty = "0.8"
+
+# Office / PDF text extraction. Without these, fs_read_file used to dump
+# 256 KB of UTF-8-lossy binary garbage when the agent tried to read a .xlsx
+# / .docx / .pptx / .pdf — model would then loop trying to "extract with
+# Python", blow context, and the conversation would die. With these in
+# place, src/office.rs::extract_by_extension recognises the format and
+# returns clean markdown that fits in the same 256 KB budget.
+#
+#   calamine    — pure-Rust xlsx/xls/xlsm/xlsb reader. Most popular Rust
+#                 spreadsheet crate; handles formulas / dates / merged
+#                 cells well enough for our "give the LLM the values"
+#                 use case.
+#   zip         — direct ZIP access for docx/pptx (both are zipped XML
+#                 bundles). calamine has its own zip dep but the version
+#                 pin doesn't always line up; vendoring our own keeps
+#                 docx/pptx independent.
+#   quick-xml   — pull-parser style XML reader. We only walk a handful of
+#                 known tags (w:t for docx body text, a:t for pptx slide
+#                 text), so SAX-style streaming is a perfect fit and
+#                 avoids loading the whole tree into memory.
+#   pdf-extract — text-only PDF extraction. Heavier than the rest (~2 MB
+#                 in release binary) but the only mature option; pdf-rs
+#                 / lopdf are lower-level and would need substantial
+#                 wrapping. Encrypted / scanned PDFs return an error
+#                 cleanly rather than crashing.
+calamine = "0.30"
+zip = "5"
+quick-xml = "0.39"
+pdf-extract = "0.10"
 
 [profile.release]
 # Small bundles matter — this is the whole point of Tauri over Electron.

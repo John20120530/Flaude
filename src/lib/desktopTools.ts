@@ -92,8 +92,16 @@ export function registerDesktopTools(): void {
   registerTool({
     name: 'fs_read_file',
     description:
-      'Read a text file inside the current workspace. Large files are truncated at ~256 KB. ' +
-      'Prefer reading before editing — do not invent code based on filenames alone.',
+      'Read a file inside the current workspace as text. ' +
+      'Plain-text files (source code, markdown, json, csv, txt) are returned directly, ' +
+      'truncated at ~256 KB. ' +
+      'Office files (.xlsx / .xls / .xlsm / .xlsb / .docx / .pptx) and .pdf are ' +
+      'automatically converted to clean markdown — xlsx becomes markdown tables, ' +
+      'docx becomes paragraphs, pptx gets one section per slide, pdf gets the ' +
+      'extracted text. You DO NOT need to call any other tool or write Python ' +
+      'to read these formats — just call fs_read_file with the .xlsx / .docx / .pdf ' +
+      'path and you will get the content as text. ' +
+      'Prefer reading before editing — do not invent content based on filenames alone.',
     parameters: {
       type: 'object',
       properties: {

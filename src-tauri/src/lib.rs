@@ -22,6 +22,7 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
 mod bgshell;
+mod office;
 mod pty;
 
 // ---------------------------------------------------------------------------
@@ -151,8 +152,22 @@ async fn fs_list_dir(
     Ok(out)
 }
 
-/// Read up to `max_bytes` of a file as UTF-8 (lossy). Anything larger is
-/// truncated — LLMs don't need 10 MB of source.
+/// Read a file as text.
+///
+/// For plain-text files (source code, markdown, json, csv, ...): up to
+/// `max_bytes` UTF-8-lossy bytes, default 256 KB.
+///
+/// For Office formats (xlsx / docx / pptx) and PDF: auto-routes to
+/// `office::extract_by_extension` and returns clean markdown instead of
+/// the raw zipped/binary bytes. The agent doesn't have to know — it just
+/// keeps calling `fs_read_file` and gets sensible content for whatever it
+/// asks. Without this, the agent would loop on "let me try Python" and
+/// burn 60 KB of context on `PK\x03\x04` noise per attempt; we saw a
+/// real task with 42 tool calls / 7 errors before the conversation died.
+///
+/// `max_bytes` is honored only for the plain-text path; Office extraction
+/// has its own internal cap (see `office::MAX_EXTRACT_BYTES`) calibrated
+/// for the denser markdown output.
 #[tauri::command]
 async fn fs_read_file(
     workspace: String,
@@ -160,17 +175,39 @@ async fn fs_read_file(
     max_bytes: Option<u64>,
 ) -> Result<String, String> {
     let target = resolve_in_workspace(&workspace, &path)?;
-    let limit = max_bytes.unwrap_or(256 * 1024); // 256 KB default
-    let f = tokio::fs::File::open(&target)
-        .await
-        .map_err(|e| format!("打开文件失败: {e}"))?;
-    let meta = f
-        .metadata()
+
+    // Refuse directories early — same behaviour as before, but with a
+    // metadata read that doesn't require opening a file handle (cheaper
+    // and works correctly on Windows where some directories error on
+    // open).
+    let meta = tokio::fs::metadata(&target)
         .await
         .map_err(|e| format!("读取元数据失败: {e}"))?;
     if meta.is_dir() {
         return Err("目标是目录，不是文件".into());
     }
+
+    // Office / PDF route. We push the sync extraction onto a blocking
+    // thread so the async runtime stays responsive — `pdf_extract` in
+    // particular can take seconds on a multi-page PDF and would
+    // otherwise hold up other Tauri commands behind it.
+    let ext = target
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    if office::is_office_extension(&ext) {
+        let target_owned = target.clone();
+        return tokio::task::spawn_blocking(move || office::extract_by_extension(&target_owned))
+            .await
+            .map_err(|e| format!("抽取任务被中断: {e}"))?;
+    }
+
+    // Plain-text path — preserved verbatim from the pre-v0.1.16 version.
+    let limit = max_bytes.unwrap_or(256 * 1024); // 256 KB default
+    let f = tokio::fs::File::open(&target)
+        .await
+        .map_err(|e| format!("打开文件失败: {e}"))?;
     let mut buf = Vec::with_capacity(std::cmp::min(limit as usize, meta.len() as usize));
     let mut handle = f.take(limit);
     handle
@@ -187,6 +224,31 @@ async fn fs_read_file(
     } else {
         Ok(text)
     }
+}
+
+/// Explicit Office / PDF text extraction. `fs_read_file` already auto-routes
+/// to this — exposing the standalone command lets the frontend (or future
+/// tools) call it directly when they know the extension up front, without
+/// the file-existence + extension-sniff dance.
+///
+/// Returns the same clean-markdown shape as the auto-routed path.
+#[tauri::command]
+async fn office_extract(workspace: String, path: String) -> Result<String, String> {
+    let target = resolve_in_workspace(&workspace, &path)?;
+    let ext = target
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    if !office::is_office_extension(&ext) {
+        return Err(format!(
+            "office_extract 不支持的扩展名: {ext}（支持: xlsx/xls/xlsm/xlsb/docx/pptx/pdf）"
+        ));
+    }
+    let target_owned = target.clone();
+    tokio::task::spawn_blocking(move || office::extract_by_extension(&target_owned))
+        .await
+        .map_err(|e| format!("抽取任务被中断: {e}"))?
 }
 
 #[tauri::command]
@@ -358,6 +420,7 @@ pub fn run() {
             fs_read_file,
             fs_write_file,
             fs_stat,
+            office_extract,
             save_text_file,
             shell_exec,
             pty::pty_create,

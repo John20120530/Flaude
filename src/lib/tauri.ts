@@ -100,6 +100,25 @@ export async function fsReadFile(
   return tauriInvoke<string>('fs_read_file', { workspace, path, maxBytes });
 }
 
+/**
+ * Explicit text extraction for Office (.xlsx / .xls / .xlsm / .xlsb / .docx /
+ * .pptx) and PDF files. Returns clean markdown — tables for spreadsheets,
+ * paragraphs for documents, slide-numbered sections for presentations,
+ * page-stripped text for PDF.
+ *
+ * Note: `fsReadFile` already auto-routes to the same backend implementation
+ * when it sees one of these extensions. This standalone function is here for
+ * the rarer case where the caller knows the format up front and wants to
+ * skip the existence + extension sniff (e.g. processing a drag-and-dropped
+ * file before deciding whether to attach it as text or image).
+ */
+export async function officeExtract(
+  workspace: string,
+  path: string
+): Promise<string> {
+  return tauriInvoke<string>('office_extract', { workspace, path });
+}
+
 export async function fsWriteFile(
   workspace: string,
   path: string,
