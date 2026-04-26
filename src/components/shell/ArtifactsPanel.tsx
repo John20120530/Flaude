@@ -22,10 +22,34 @@ import { X, Code, Eye, Download, Copy, Check, RefreshCw, Trash2 } from 'lucide-r
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { artifactToHtml } from '@/lib/artifacts';
+import { downloadTextFile } from '@/lib/tauri';
 import { cn } from '@/lib/utils';
 
 /** Tune with care: too small = strobe during streaming; too large = laggy preview. */
 const IFRAME_DEBOUNCE_MS = 300;
+
+/**
+ * Map artifact type → MIME for the download blob. We deliberately don't
+ * rely on `text/plain` for everything: a downloaded `.html` file with
+ * `Content-Type: text/plain` opens in a text editor on some OS file
+ * managers, which surprises the user. Specific MIMEs let the OS hand
+ * the file off to the right opener (browser for html/svg, markdown
+ * editor for .md if installed).
+ */
+function mimeForType(type: string | undefined): string {
+  switch (type) {
+    case 'html':
+      return 'text/html;charset=utf-8';
+    case 'svg':
+      return 'image/svg+xml;charset=utf-8';
+    case 'markdown':
+      return 'text/markdown;charset=utf-8';
+    case 'json':
+      return 'application/json;charset=utf-8';
+    default:
+      return 'text/plain;charset=utf-8';
+  }
+}
 
 export default function ArtifactsPanel() {
   const activeArtifactId = useAppStore((s) => s.activeArtifactId);
@@ -93,14 +117,17 @@ export default function ArtifactsPanel() {
           : active.type === 'markdown'
             ? 'md'
             : active.language || 'txt';
-    const blob = new Blob([active.content], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${active.title.replace(/[^a-z0-9\u4e00-\u9fa5-_]+/gi, '_')}.${ext}`;
-    a.click();
-    // Give the browser a tick to initiate the download before we revoke.
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    const filename = `${active.title.replace(
+      /[^a-z0-9\u4e00-\u9fa5-_]+/gi,
+      '_'
+    )}.${ext}`;
+    // Route through downloadTextFile so we get the Tauri dialog plugin in
+    // the desktop build and a normal anchor click on the web. The previous
+    // implementation only used the anchor-click trick, which WebView2
+    // (Tauri's renderer on Windows) silently swallows \u2014 clicking the
+    // download button in the desktop app did literally nothing. Same
+    // helper that DesignCanvas's HTML export already uses.
+    void downloadTextFile(filename, active.content, mimeForType(active.type));
   };
 
   return (
