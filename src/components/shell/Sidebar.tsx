@@ -54,7 +54,7 @@ export default function Sidebar() {
   // auth-presence because non-admin users shouldn't even see the link — the
   // route guard in App.tsx is the real gate, this just hides a dead entry.
   const isAdmin = useAppStore((s) => s.auth?.user.role === 'admin');
-  // Sync state drives the small indicator next to "v0.1" in the header. We
+  // Sync state drives the small indicator next to the version label in the header. We
   // subscribe to both fields separately so React bails out on identity-equal
   // updates (syncError stays null across every pull/push when things work).
   const syncState = useAppStore((s) => s.syncState);
@@ -124,7 +124,9 @@ export default function Sidebar() {
               />
             </span>
           )}
-          <span>v0.1</span>
+          <span title="当前安装版本（点 Settings 可手动检查更新）">
+            v{__APP_VERSION__}
+          </span>
         </div>
       </div>
 

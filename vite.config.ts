@@ -1,6 +1,16 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
+
+// Pull `version` out of package.json at config-evaluation time so the
+// sidebar's version label always matches the build it shipped in. Doing
+// this via `define` (below) means the value lands as an inlined string
+// constant — no JSON import, no runtime fetch, no bundle-size hit beyond
+// the bytes of the version string itself.
+const pkg = JSON.parse(
+  readFileSync(path.resolve(__dirname, 'package.json'), 'utf8')
+) as { version: string };
 
 /**
  * Tauri-aware Vite config. Tauri drives the dev server via `beforeDevCommand`
@@ -15,6 +25,12 @@ const host: string | undefined = process.env.TAURI_DEV_HOST;
 
 export default defineConfig({
   plugins: [react()],
+  // Inject package.json version as a compile-time global. Read by the
+  // sidebar header and anything else that wants to surface the running
+  // version without round-tripping to package.json at runtime.
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

@@ -15,3 +15,12 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
+
+/**
+ * Inlined at build time from `package.json.version` (see vite.config.ts →
+ * `define`). Use this anywhere we want to surface the running version
+ * (sidebar header, debug logs, telemetry, etc.) — kept as a global rather
+ * than a module import so it works unchanged in both dev and prod, and so
+ * tree-shaking handles it cleanly without any deferred runtime fetch.
+ */
+declare const __APP_VERSION__: string;
