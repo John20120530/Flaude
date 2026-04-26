@@ -40,6 +40,27 @@ describe('composeSystemPrompt', () => {
     expect(blank).not.toContain('用户记忆');
   });
 
+  it('strips <!--disabled--> lines from globalMemory before injection', () => {
+    const out = composeSystemPrompt({
+      basePrompt: BASE,
+      mode: 'chat',
+      globalMemory: 'kept fact\n<!--disabled--> hidden fact\nanother kept',
+    });
+    expect(out).toContain('kept fact');
+    expect(out).toContain('another kept');
+    expect(out).not.toContain('hidden fact');
+    expect(out).not.toContain('<!--disabled-->');
+  });
+
+  it('skips the memory section entirely when every line is disabled', () => {
+    const out = composeSystemPrompt({
+      basePrompt: BASE,
+      mode: 'chat',
+      globalMemory: '<!--disabled--> a\n<!--disabled--> b',
+    });
+    expect(out).not.toContain('用户记忆');
+  });
+
   it('filters skills by mode — injects only matching ones', () => {
     const skills = [
       skill({ id: 'a', name: 'only-code', modes: ['code'] }),
