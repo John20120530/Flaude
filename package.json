@@ -1,7 +1,7 @@
 {
   "name": "flaude",
   "private": true,
-  "version": "0.1.18",
+  "version": "0.1.19",
   "type": "module",
   "description": "A Claude-like client powered by Chinese open-source LLMs",
   "scripts": {
