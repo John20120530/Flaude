@@ -68,6 +68,21 @@ jobs:
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
+      # The frontend's `tsc -b` follows imports into ../../server/src/* (the
+      # catalogDrift test verifies client + server model lists agree, see
+      # src/lib/catalogDrift.test.ts). Server has its own package.json with
+      # `@cloudflare/workers-types` as a devDep — without installing it, tsc
+      # walks the import chain into server/src/env.ts and can't resolve
+      # `Cloudflare.Env`, failing the build with `Cannot find module
+      # '@cloudflare/workers-types'`. Local dev usually has server deps
+      # already installed by hand so this gap stayed hidden through v0.1.10
+      # (drift test landed just after that release) and CI started failing
+      # silently from v0.1.11 onward — six tagged releases never produced
+      # an actual bundle. Run server's install too so tsc finds the types.
+      - name: Install server deps (for catalogDrift test types)
+        run: pnpm install --frozen-lockfile
+        working-directory: server
+
       - name: Build Tauri bundle
         env:
           # Updater signing — see comment block at the top of this file.
