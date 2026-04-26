@@ -759,7 +759,63 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
-  }, []);
+    // Clean up any tool_calls the model emitted but never got results for.
+    // Without this, the next user message serializes a history with orphan
+    // tool_calls and the upstream returns 400 "An assistant message with
+    // 'tool_calls' must be followed by tool messages…". The wire-format
+    // serializer also drops orphans defensively, but doing it in the store
+    // too means the user sees the truth visually (✗ canceled badges
+    // instead of a forever-spinning 等待 chip).
+    const conv = useAppStore
+      .getState()
+      .conversations.find((c) => c.id === conversation.id);
+    if (!conv) return;
+    const last = conv.messages[conv.messages.length - 1];
+    if (!last || last.role !== 'assistant' || !last.toolCalls?.length) return;
+    const respondedIds = new Set<string>();
+    // Walk forward from the assistant message's index — tool messages
+    // always come after their owning assistant message in our protocol.
+    for (let i = conv.messages.length - 1; i >= 0; i--) {
+      const m = conv.messages[i];
+      if (!m) continue;
+      if (m.role === 'tool') {
+        const tcid = m.toolCalls?.[0]?.id;
+        if (tcid) respondedIds.add(tcid);
+      }
+      if (m === last) break;
+    }
+    const orphans = last.toolCalls.filter((tc) => !respondedIds.has(tc.id));
+    if (orphans.length === 0) return;
+
+    // Mark each orphan tool_call as errored on the assistant message.
+    const patchedToolCalls = last.toolCalls.map((tc) => {
+      if (respondedIds.has(tc.id)) return tc;
+      return {
+        ...tc,
+        status: 'error' as const,
+        error: '用户取消',
+      };
+    });
+    patchLastMessage(conversation.id, { toolCalls: patchedToolCalls });
+
+    // Append a synthetic tool result for each orphan so the conversation
+    // history is valid OpenAI-shape going forward.
+    for (const tc of orphans) {
+      appendMessage(conversation.id, {
+        id: uid('msg'),
+        role: 'tool',
+        content: '用户取消',
+        toolCalls: [
+          {
+            ...tc,
+            status: 'error',
+            error: '用户取消',
+          },
+        ],
+        createdAt: Date.now(),
+      });
+    }
+  }, [conversation.id, appendMessage, patchLastMessage]);
 
   return { send, regenerate, stop, streaming, compress, compressing };
 }

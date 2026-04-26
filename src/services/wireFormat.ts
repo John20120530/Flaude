@@ -38,6 +38,23 @@ export function serializeMessages(messages: Message[], system?: string): WireMes
   const out: WireMessage[] = [];
   if (system) out.push({ role: 'system', content: system });
 
+  // Pre-pass: collect every tool_call_id that has a matching role='tool'
+  // result message. Any tool_call on an assistant message whose id is NOT
+  // in this set is orphaned — almost always because the user clicked Stop
+  // mid-call before the tool result was appended. The OpenAI-compatible
+  // contract requires every assistant tool_call to be followed by a tool
+  // message responding to it; sending an orphan triggers a 400 with
+  // "An assistant message with 'tool_calls' must be followed by tool
+  // messages responding to each 'tool_call_id'". We strip orphans here
+  // so a user can resume a stopped conversation without seeing that
+  // error — even if the message store wasn't cleaned up by the abort path.
+  const respondedToolCallIds = new Set<string>();
+  for (const m of messages) {
+    if (m.role !== 'tool') continue;
+    const tcid = m.toolCalls?.[0]?.id;
+    if (tcid) respondedToolCallIds.add(tcid);
+  }
+
   for (const m of messages) {
     if (m.role === 'tool') {
       out.push({
@@ -49,12 +66,28 @@ export function serializeMessages(messages: Message[], system?: string): WireMes
     }
 
     if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
+      const liveCalls = m.toolCalls.filter((tc) => respondedToolCallIds.has(tc.id));
+
+      if (liveCalls.length === 0) {
+        // Every tool_call was orphaned. Fall back to a plain assistant
+        // message — preserving any partial text the model produced before
+        // the abort. If there's neither content nor live calls, drop the
+        // message entirely (it'd be an empty assistant turn the upstream
+        // would also reject).
+        const text = (m.content ?? '').trim();
+        if (!text) continue;
+        const msg: WireMessage = { role: 'assistant', content: text };
+        if (m.reasoning) msg.reasoning_content = m.reasoning;
+        out.push(msg);
+        continue;
+      }
+
       // An assistant turn that requested tool calls. OpenAI wants `tool_calls`
       // on the message itself; `content` may be empty.
       const msg: WireMessage = {
         role: 'assistant',
         content: m.content || null,
-        tool_calls: m.toolCalls.map((tc) => ({
+        tool_calls: liveCalls.map((tc) => ({
           id: tc.id,
           type: 'function',
           function: {
