@@ -39,7 +39,23 @@ export interface ToolContext {
    * tools → store.
    */
   setTodos?: (todos: TodoItem[]) => void;
+  /**
+   * Hook for `exit_plan_mode`. Same cycle-avoidance reason as `setTodos` —
+   * the handler awaits a Promise resolved by the PlanApprovalModal in the
+   * UI tree. Injected by useStreamedChat from src/lib/planMode.ts.
+   */
+  requestPlanApproval?: (plan: string) => Promise<PlanApprovalResultLite>;
 }
+
+/**
+ * Lite version of PlanApprovalResult — duplicated here to keep tools.ts
+ * free of any direct import from planMode.ts (which would re-introduce
+ * the cycle through the store).
+ */
+export type PlanApprovalResultLite =
+  | { kind: 'approved' }
+  | { kind: 'feedback'; feedback: string }
+  | { kind: 'rejected'; reason?: string };
 
 export interface ToolDefinition {
   name: string;
@@ -542,6 +558,67 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
         language: typeof language === 'string' ? language : undefined,
       });
       return `已创建工件「${title}」(id=${id})。用户可在右侧工件面板查看。`;
+    },
+  },
+
+  // ----- exit_plan_mode --------------------------------------------------
+  // Plan-mode terminator. The agent calls this with a markdown plan; the
+  // UI shows it for approval, and the result text is fed back so the
+  // agent can either proceed (approval unlocks destructive tools for
+  // this turn) or revise (feedback) or stop (reject).
+  //
+  // Mode: `code` only — Plan mode is a Code-mode workflow. In Chat /
+  // Design there's nothing destructive to gate, so the tool would be
+  // pure overhead.
+  {
+    name: 'exit_plan_mode',
+    description:
+      '提交一份完整的执行计划给用户审批。**只有当用户启用了 Plan 模式时才需要调用**——平时不要主动用。' +
+      '调用前请先用只读工具（fs_list_dir / fs_read_file / fs_stat / web_fetch / shell_read）充分了解上下文，' +
+      '然后把计划写成 markdown：每一步具体到要改哪些文件 / 跑什么命令 / 预期结果。' +
+      '调用此工具后会暂停等待用户批准；批准后才能使用 fs_write_file / shell_exec 等副作用工具。',
+    parameters: {
+      type: 'object',
+      properties: {
+        plan: {
+          type: 'string',
+          description:
+            '完整的 markdown 计划。结构建议：## 目标 / ## 步骤 / ## 风险 / ## 验证标准。' +
+            '不要把读到的源码贴在这里——只写「读了 X、发现 Y、所以打算做 Z」。',
+        },
+      },
+      required: ['plan'],
+    },
+    source: 'builtin',
+    modes: ['code'],
+    handler: async ({ plan }, { requestPlanApproval }) => {
+      if (!requestPlanApproval) {
+        // Reachable when the user hasn't enabled Plan mode for this turn.
+        // We deliberately fail soft so the agent gets useful feedback and
+        // continues the turn instead of dying.
+        throw new Error(
+          'Plan 模式未启用：用户没有为本轮开启 Plan。直接执行任务即可，不要再调用 exit_plan_mode。',
+        );
+      }
+      if (typeof plan !== 'string' || !plan.trim()) {
+        throw new Error('plan 必须是非空字符串。');
+      }
+      const result = await requestPlanApproval(plan);
+      if (result.kind === 'approved') {
+        return '✅ 用户已批准计划。可以开始执行——副作用工具（fs_write_file / shell_exec / shell_start 等）现已解锁。';
+      }
+      if (result.kind === 'feedback') {
+        return (
+          '🔄 用户希望调整计划。反馈如下：\n\n' +
+          result.feedback +
+          '\n\n请按反馈修改计划后**重新调用 exit_plan_mode** 提交新版本。副作用工具仍然锁定。'
+        );
+      }
+      return (
+        '❌ 用户拒绝了这份计划' +
+        (result.reason ? `：${result.reason}` : '。') +
+        '\n请在不调用副作用工具的前提下，根据用户接下来的输入继续。'
+      );
     },
   },
 ];
