@@ -190,17 +190,18 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
       // which is exactly what designExtract expects.
       const isDesignMode = conversation.mode === 'design';
 
-      // Throttle reasoning-delta patches. DeepSeek V4 Pro thinking-mode
-      // emits a long CoT stream (we've seen 1500-1700 chars per turn);
-      // patching the store on every single token triggers a Zustand
-      // persist write of the entire state to localStorage on each token.
-      // Across 1500 tokens of reasoning + a multi-MB conversation (after
-      // a couple of office_extract calls), that's the difference between
-      // "smooth" and "WebView2 renderer OOM mid-stream". Buffer for ~150ms
-      // between flushes — visually indistinguishable from real-time, but
-      // ~50× fewer state writes. We always flush the latest accumulated
-      // value at the end of the stream regardless.
-      const REASONING_FLUSH_MS = 150;
+      // Throttle store patches during streaming. DeepSeek V4 Pro thinking-
+      // mode emits a long CoT (1500-1700 chars/turn); a `create_artifact`
+      // call streams its `content` arg as a multi-KB HTML blob token by
+      // token. Each token would otherwise trigger a Zustand persist write
+      // of the entire conversation state to localStorage — across thousands
+      // of tokens that's the difference between "smooth" and "WebView2
+      // renderer OOM mid-stream". Buffer for ~150 ms between flushes —
+      // visually indistinguishable from real-time, but ~50× fewer state
+      // writes. Always flush the latest snapshot at end-of-stream.
+      const STREAM_FLUSH_MS = 150;
+
+      // Reasoning throttle.
       let reasoningPending = false;
       let reasoningTimer: ReturnType<typeof setTimeout> | null = null;
       const flushReasoning = () => {
@@ -216,7 +217,31 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
       const scheduleReasoning = () => {
         reasoningPending = true;
         if (reasoningTimer) return;
-        reasoningTimer = setTimeout(flushReasoning, REASONING_FLUSH_MS);
+        reasoningTimer = setTimeout(flushReasoning, STREAM_FLUSH_MS);
+      };
+
+      // Tool-call-delta throttle. Critical for create_artifact whose
+      // `content` argument can stream as 5-20 KB of HTML/CSS — without
+      // throttling, every chunk triggers a persist of the full state
+      // including the in-progress tool call args.
+      let toolCallsPending = false;
+      let toolCallsTimer: ReturnType<typeof setTimeout> | null = null;
+      const flushToolCalls = () => {
+        if (toolCallsTimer) {
+          clearTimeout(toolCallsTimer);
+          toolCallsTimer = null;
+        }
+        if (toolCallsPending) {
+          patchLastMessage(conversation.id, {
+            toolCalls: [...toolCallsMap.values()],
+          });
+          toolCallsPending = false;
+        }
+      };
+      const scheduleToolCalls = () => {
+        toolCallsPending = true;
+        if (toolCallsTimer) return;
+        toolCallsTimer = setTimeout(flushToolCalls, STREAM_FLUSH_MS);
       };
 
       for await (const chunk of streamChat({
@@ -246,9 +271,7 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
             // providerClient yields the same buffer object repeatedly; storing
             // it by id lets later deltas mutate in place.
             toolCallsMap.set(tc.id, tc as ToolCall);
-            patchLastMessage(conversation.id, {
-              toolCalls: [...toolCallsMap.values()],
-            });
+            scheduleToolCalls();
           }
         }
         if (chunk.usage) {
@@ -278,11 +301,12 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
         }
       }
 
-      // Stream ended (or errored) — make sure the latest reasoning chunk
-      // makes it to the store. Without this, the user could see "thinking…"
-      // freeze 100-150ms short of the full trace because the throttle
-      // timer never got to fire.
+      // Stream ended (or errored) — flush all throttled streams so the
+      // store reflects the final snapshot. Without these flushes the
+      // user could see reasoning / tool-call args freeze 100-150 ms short
+      // of complete because the throttle timer never got to fire.
       flushReasoning();
+      flushToolCalls();
 
       // Normal termination — nothing more to do.
       if (finishReason !== 'tool_calls' || toolCallsMap.size === 0) return;
