@@ -79,16 +79,21 @@ const DEEPSEEK: ProviderConfig = {
 // different request schema.
 //
 // Pricing as of 2026-04 (DashScope public rates, converted from CNY @ ~¥7/$):
-//   qwen-turbo       : input  ¥0.3 / 1M  ≈ $0.043 → 43 micros/1k
-//                      output ¥0.6 / 1M  ≈ $0.086 → 86 micros/1k
-//   qwen-plus        : input  ¥0.8 / 1M  ≈ $0.114 → 114 micros/1k
-//                      output ¥2.0 / 1M  ≈ $0.286 → 286 micros/1k
-//   qwen-max         : input  ¥2.4 / 1M  ≈ $0.343 → 343 micros/1k
-//                      output ¥9.6 / 1M  ≈ $1.371 → 1371 micros/1k
-//   qwen-long        : input  ¥0.5 / 1M  ≈ $0.071 → 71 micros/1k  (long-ctx tier)
-//                      output ¥2.0 / 1M  ≈ $0.286 → 286 micros/1k
-//   qwen-coder-plus  : input  ¥3.5 / 1M  ≈ $0.500 → 500 micros/1k (coder tier)
-//                      output ¥7.0 / 1M  ≈ $1.000 → 1000 micros/1k
+//   qwen-turbo          : input  ¥0.3  / 1M  ≈ $0.043 → 43 micros/1k
+//                         output ¥0.6  / 1M  ≈ $0.086 → 86 micros/1k
+//   qwen-plus           : input  ¥0.8  / 1M  ≈ $0.114 → 114 micros/1k
+//                         output ¥2.0  / 1M  ≈ $0.286 → 286 micros/1k
+//   qwen-max            : input  ¥2.4  / 1M  ≈ $0.343 → 343 micros/1k
+//                         output ¥9.6  / 1M  ≈ $1.371 → 1371 micros/1k
+//   qwen-long           : input  ¥0.5  / 1M  ≈ $0.071 → 71 micros/1k  (long-ctx tier)
+//                         output ¥2.0  / 1M  ≈ $0.286 → 286 micros/1k
+//   qwen-coder-plus     : input  ¥3.5  / 1M  ≈ $0.500 → 500 micros/1k (coder tier)
+//                         output ¥7.0  / 1M  ≈ $1.000 → 1000 micros/1k
+//   qwen-vl-max-latest  : input  ¥20   / 1M  ≈ $2.857 → 2857 micros/1k (vision tier)
+//                         output ¥20   / 1M  ≈ $2.857 → 2857 micros/1k
+//                         + image input billed by resolution (DashScope handles
+//                         the conversion upstream — we just see the resulting
+//                         token count and bill at this rate).
 //
 // Re-check before production; Alibaba adjusts prices quarterly.
 const QWEN: ProviderConfig = {
@@ -96,11 +101,12 @@ const QWEN: ProviderConfig = {
   baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
   keyEnvName: 'QWEN_API_KEY',
   models: {
-    'qwen-turbo':       { inputMicroUsdPer1k:  43, outputMicroUsdPer1k:   86 },
-    'qwen-plus':        { inputMicroUsdPer1k: 114, outputMicroUsdPer1k:  286 },
-    'qwen-max':         { inputMicroUsdPer1k: 343, outputMicroUsdPer1k: 1371 },
-    'qwen-long':        { inputMicroUsdPer1k:  71, outputMicroUsdPer1k:  286 },
-    'qwen-coder-plus':  { inputMicroUsdPer1k: 500, outputMicroUsdPer1k: 1000 },
+    'qwen-turbo':         { inputMicroUsdPer1k:   43, outputMicroUsdPer1k:   86 },
+    'qwen-plus':          { inputMicroUsdPer1k:  114, outputMicroUsdPer1k:  286 },
+    'qwen-max':           { inputMicroUsdPer1k:  343, outputMicroUsdPer1k: 1371 },
+    'qwen-long':          { inputMicroUsdPer1k:   71, outputMicroUsdPer1k:  286 },
+    'qwen-coder-plus':    { inputMicroUsdPer1k:  500, outputMicroUsdPer1k: 1000 },
+    'qwen-vl-max-latest': { inputMicroUsdPer1k: 2857, outputMicroUsdPer1k: 2857 },
   },
 };
 

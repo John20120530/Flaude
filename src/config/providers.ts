@@ -62,10 +62,28 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = [
         id: 'qwen-max',
         providerId: 'qwen',
         displayName: 'Qwen-Max',
-        description: '旗舰对话模型，通用能力最强',
+        description: '旗舰对话模型，通用能力最强（仅文本）',
         contextWindow: 32_000,
-        capabilities: { tools: true, vision: true },
+        // qwen-max in DashScope's OpenAI-compat mode is text-only — sending
+        // image_url parts to it gets them silently dropped. Vision lives on
+        // the dedicated qwen-vl-* family below. We had this set to `true`
+        // and design-mode image attachments routed here for ~3 releases
+        // before we caught it; the model produces hallucinated picsum
+        // placeholders since it never actually saw the image.
+        capabilities: { tools: true },
         recommendedFor: ['chat'],
+      },
+      {
+        id: 'qwen-vl-max-latest',
+        providerId: 'qwen',
+        displayName: 'Qwen-VL-Max（视觉）',
+        description: '视觉旗舰，看图说话 / 设计稿改写',
+        contextWindow: 32_000,
+        capabilities: { vision: true },
+        // Design picks this up automatically when an image is attached;
+        // listing `recommendedFor: ['design']` keeps it discoverable in
+        // the model picker for users who want to manually pin it.
+        recommendedFor: ['design'],
       },
       {
         id: 'qwen-plus',
@@ -73,7 +91,9 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = [
         displayName: 'Qwen-Plus',
         description: '平衡性能与成本',
         contextWindow: 128_000,
-        capabilities: { tools: true, vision: true },
+        // Same caveat as qwen-max — compat-mode is text-only despite the
+        // model card listing multimodal snapshots. Don't claim vision here.
+        capabilities: { tools: true },
         recommendedFor: ['chat', 'code'],
       },
       {
@@ -181,16 +201,27 @@ export const DEFAULT_MODEL_BY_MODE: Record<'chat' | 'code' | 'design', string> =
 
 /**
  * Vision-capable model used as a fallback when a Design-mode message has
- * image attachments. V4 Pro can't see images; Qwen-Max can. We auto-route
- * just that single turn through Qwen-Max and bounce back to V4 Pro on the
- * next text-only turn — the user gets screenshot-redesign for free, with
- * no manual model switching.
+ * image attachments. V4 Pro can't see images; Qwen-VL-Max can. We auto-route
+ * just that single turn through Qwen-VL-Max and bounce back to V4 Pro on
+ * the next text-only turn — the user gets screenshot-redesign for free,
+ * with no manual model switching.
  *
- * Picked Qwen-Max over GLM-4 Plus because Qwen's vision pipeline is more
- * mature on DashScope and the OpenAI-compat surface handles `image_url`
- * parts cleanly without provider-specific parameter shimming.
+ * **Why `-latest` and not the bare `qwen-vl-max`**: DashScope rolls the
+ * snapshot pointer forward on the `-latest` alias every few months as new
+ * VL releases ship; pinning a specific date (`qwen-vl-max-2024-09-19`) ages
+ * out fast. If alibaba ever breaks compat we can pin to a known-good date.
+ *
+ * **Why not `qwen-max` (the previous default, replaced 2026-04-26)**:
+ * `qwen-max` in DashScope's OpenAI-compat mode is text-only — image_url
+ * content parts get silently dropped, the model hallucinates picsum.photos
+ * placeholders, and the user gets a mountain stock photo instead of a
+ * redesigned screenshot. Vision lives on the dedicated `qwen-vl-*` family.
+ *
+ * **Why not GLM-4 / Zhipu**: GLM-4-Plus does support vision but pricing
+ * is higher and the OpenAI-compat surface needs more parameter shimming;
+ * VL-Max is cheaper for the typical small-resolution screenshot input.
  */
-export const DESIGN_VISION_FALLBACK_MODEL = 'qwen-max';
+export const DESIGN_VISION_FALLBACK_MODEL = 'qwen-vl-max-latest';
 
 /**
  * Models that come in "base ↔ reasoner" pairs — same family, non-thinking vs
