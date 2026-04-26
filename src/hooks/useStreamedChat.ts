@@ -269,10 +269,26 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
 
       // The assistant turn that just ended — record it in history with its
       // tool_calls so the follow-up request has proper context.
+      //
+      // `reasoning` MUST be carried through here. DeepSeek's thinking-mode
+      // contract is: "every API call after the model produced
+      // reasoning_content must echo that content back inside the same
+      // assistant message." We accumulate the reasoning string during the
+      // stream above (line ~210) and persist it to the store via
+      // patchLastMessage, but the *history array* used for the next API
+      // call is constructed by hand right here — so we have to read the
+      // local `reasoning` variable, not rely on the stored message. Without
+      // this line the upstream returns 400 with "The reasoning_content in
+      // the thinking mode must be passed back to the API." on the second
+      // turn of any tool-calling thinking-mode conversation. (v0.1.18 fixed
+      // serializeMessages to forward `reasoning_content` from m.reasoning
+      // to the wire — but m.reasoning was always empty here because of
+      // this very omission. v0.1.19 closes the loop.)
       const assistantTurn: Message = {
         id: assistantMsgId,
         role: 'assistant',
         content: accumulated, // raw; serializeMessages will still ship it
+        reasoning: reasoning || undefined,
         toolCalls,
         createdAt: Date.now(),
         modelId: effectiveModelId,
