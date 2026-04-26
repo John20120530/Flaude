@@ -1,4 +1,5 @@
 import type { Project, Skill, WorkMode } from '@/types';
+import { effectiveGlobalMemory } from './globalMemory';
 
 /**
  * Compose the full system prompt for a conversation, combining:
@@ -47,7 +48,12 @@ export function composeSystemPrompt(options: {
   } = options;
   const parts: string[] = [basePrompt];
 
-  if (globalMemory && globalMemory.trim()) {
+  // Strip out entries the user marked as disabled in the Settings UI before
+  // injecting. The raw string can contain `<!--disabled-->`-prefixed lines
+  // that should be persisted (so toggling back on doesn't lose them) but
+  // never reach the model.
+  const liveMemory = effectiveGlobalMemory(globalMemory).trim();
+  if (liveMemory) {
     parts.push(
       [
         '',
@@ -55,7 +61,7 @@ export function composeSystemPrompt(options: {
         '',
         '以下是关于用户的持久事实，适用于所有对话。在回答时请考虑这些背景，但不要每次都显式复述：',
         '',
-        globalMemory.trim(),
+        liveMemory,
       ].join('\n')
     );
   }

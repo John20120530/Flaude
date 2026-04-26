@@ -23,10 +23,18 @@ import {
   RefreshCw,
   Download,
   Database,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
 import { cn } from '@/lib/utils';
 import type { SlashCommand, MCPServer, Skill, WorkMode } from '@/types';
+import {
+  parseEntries,
+  serializeEntries,
+  type GlobalMemoryEntry,
+} from '@/lib/globalMemory';
+import { uid } from '@/lib/utils';
 import { useRegisteredTools } from '@/lib/useTools';
 import type { ToolDefinition } from '@/lib/tools';
 import { isTauri, pickFolder } from '@/lib/tauri';
@@ -534,27 +542,42 @@ function Stat({ label, value }: { label: string; value: number }) {
 }
 
 // ---------------------------------------------------------------------------
-// Global Memory (CLAUDE.md-style persistent facts)
+// Global Memory (CLAUDE.md-style persistent facts) — entry-based UI
 // ---------------------------------------------------------------------------
-
-const MEMORY_HINT = `把适用于所有对话的持久事实写在这里。例如：
-- 偏好：pnpm 不用 npm、Tabs 缩进 2 空格、中文技术风格
-- 背景：Python/TS 主力，新手 Rust
-- 沟通：回答时不要"让我们"这种虚词，直接说结论
-
-支持 Markdown。改动立即生效到所有新消息的 system prompt。`;
+//
+// `globalMemory` is stored as a single string for sync/export simplicity, but
+// presented here as a list of toggle-able entries. Each entry maps to one
+// non-blank line in the underlying string; disabled entries get a
+// <!--disabled--> marker prefix so they survive a reload but are stripped
+// from the model's system prompt by `effectiveGlobalMemory`.
+//
+// Edit model: changes commit to the store immediately on blur or Enter.
+// No separate "Save" button — the explicit save flow on the old textarea
+// turned out to confuse users into typing notes and then closing the page,
+// losing them. The list-with-toggle UI makes "what is the model going to
+// see right now" legible at a glance, which is the actual point of this
+// rewrite (the toggle-on/off question was the killer feature missing).
+// ---------------------------------------------------------------------------
 
 function MemorySection() {
   const globalMemory = useAppStore((s) => s.globalMemory);
   const setGlobalMemory = useAppStore((s) => s.setGlobalMemory);
-  const [draft, setDraft] = useState(globalMemory);
-  const [savedAt, setSavedAt] = useState<number | null>(null);
 
-  // If the store changes externally (e.g. `/remember` appended a line), pull
-  // the new value in — but don't clobber unsaved edits that differ.
-  useEffect(() => {
-    setDraft((d) => (d === '' || d === globalMemory ? globalMemory : d));
-  }, [globalMemory]);
+  // Parsed view of the store string. Re-derived whenever the store changes
+  // (e.g. `/remember` appends a line). When the user is mid-edit on a row,
+  // the local edit state lives on the row itself, so re-parsing here doesn't
+  // clobber in-flight typing.
+  const entries = useMemo<GlobalMemoryEntry[]>(
+    () => parseEntries(globalMemory),
+    [globalMemory],
+  );
+
+  // Buffer for "+ 添加一条" — pending entry that hasn't been committed yet.
+  // We don't put empty rows directly in the persisted string because
+  // serializeEntries drops them, which would cause an instant disappear-on-
+  // commit-of-something-else. Instead, the new-row sits in component state
+  // until the user types something and blurs/Enters.
+  const [adding, setAdding] = useState<{ id: string; text: string } | null>(null);
 
   // Scroll into view when the user arrived via `/memory` (hash anchor).
   const location = useLocation();
@@ -564,14 +587,50 @@ function MemorySection() {
     }
   }, [location.hash]);
 
-  const dirty = draft !== globalMemory;
-  const chars = draft.length;
-
-  const save = () => {
-    setGlobalMemory(draft);
-    setSavedAt(Date.now());
-    setTimeout(() => setSavedAt(null), 2000);
+  // Commit a freshly-edited list back to the store. We rebuild from the
+  // current `entries` array and selectively replace one item; never trust
+  // a stale reference from a callback closure.
+  const commitEntries = (next: GlobalMemoryEntry[]) => {
+    setGlobalMemory(serializeEntries(next));
   };
+
+  const updateEntryText = (id: string, text: string) => {
+    if (!text.trim()) {
+      // Empty after edit = delete. Less surprising than persisting blanks.
+      commitEntries(entries.filter((e) => e.id !== id));
+      return;
+    }
+    commitEntries(entries.map((e) => (e.id === id ? { ...e, text } : e)));
+  };
+
+  const toggleEntry = (id: string) => {
+    commitEntries(
+      entries.map((e) => (e.id === id ? { ...e, disabled: !e.disabled } : e)),
+    );
+  };
+
+  const deleteEntry = (id: string) => {
+    commitEntries(entries.filter((e) => e.id !== id));
+  };
+
+  const startAdding = () => {
+    setAdding({ id: uid('mem-new'), text: '' });
+  };
+
+  const commitAdding = () => {
+    const a = adding;
+    setAdding(null);
+    if (!a || !a.text.trim()) return;
+    commitEntries([
+      ...entries,
+      { id: uid('mem'), text: a.text.trim(), disabled: false },
+    ]);
+  };
+
+  const enabledCount = entries.filter((e) => !e.disabled).length;
+  const totalChars = entries
+    .filter((e) => !e.disabled)
+    .reduce((sum, e) => sum + e.text.length + 1, 0); // +1 per line for the join \n
 
   return (
     <section id="memory-section">
@@ -580,38 +639,156 @@ function MemorySection() {
         全局记忆
       </h2>
       <p className="text-sm text-claude-muted dark:text-night-muted mb-3">
-        持久事实，注入到所有对话的 system prompt 前部。类似 Claude Code 的 CLAUDE.md。
+        持久事实，注入到所有对话的 system prompt 前部。一条一行——可以单独开关、修改、删除。
         也可以用 <code className="text-xs bg-black/5 dark:bg-white/10 px-1 rounded">/remember &lt;fact&gt;</code> 从对话里追加。
       </p>
-      <textarea
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        placeholder={MEMORY_HINT}
-        className="w-full min-h-[200px] max-h-[500px] px-3 py-2 text-sm font-mono rounded-lg
-                   border border-claude-border dark:border-night-border
-                   bg-white dark:bg-night-bg focus:outline-none
-                   focus:ring-2 focus:ring-claude-accent/40 resize-y"
-      />
+
+      <div className="rounded-lg border border-claude-border dark:border-night-border bg-white dark:bg-night-bg divide-y divide-claude-border/60 dark:divide-night-border/60">
+        {entries.length === 0 && !adding && (
+          <div className="px-3 py-6 text-center text-sm text-claude-muted dark:text-night-muted">
+            还没有任何记忆。点下面「添加一条」开始——例如：「我用 pnpm，不用 npm」。
+          </div>
+        )}
+
+        {entries.map((entry) => (
+          <MemoryRow
+            key={entry.id}
+            entry={entry}
+            onToggle={() => toggleEntry(entry.id)}
+            onCommitText={(text) => updateEntryText(entry.id, text)}
+            onDelete={() => deleteEntry(entry.id)}
+          />
+        ))}
+
+        {adding && (
+          <div className="flex items-start gap-2 px-3 py-2">
+            <Plus className="w-4 h-4 mt-1.5 text-claude-muted dark:text-night-muted shrink-0" />
+            <input
+              autoFocus
+              type="text"
+              value={adding.text}
+              onChange={(e) =>
+                setAdding({ id: adding.id, text: e.target.value })
+              }
+              onBlur={commitAdding}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  commitAdding();
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setAdding(null);
+                }
+              }}
+              placeholder="写一条事实，回车或失焦时保存（Esc 取消）"
+              className="flex-1 bg-transparent text-sm focus:outline-none px-1 py-1"
+            />
+          </div>
+        )}
+      </div>
+
       <div className="flex items-center justify-between mt-2 text-xs text-claude-muted dark:text-night-muted">
         <span>
-          {chars} 字符 · 约 {Math.ceil(chars / 4)} tokens
-          {chars > 20_000 && (
+          {entries.length} 条（{enabledCount} 启用）· 约 {Math.ceil(totalChars / 4)} tokens 注入
+          {totalChars > 20_000 && (
             <span className="ml-2 text-amber-600">（过长会挤占每轮 token 预算，考虑精简）</span>
           )}
         </span>
-        <div className="flex items-center gap-2">
-          {savedAt && <span className="text-green-600">已保存</span>}
-          <button
-            onClick={save}
-            disabled={!dirty}
-            className="btn-primary text-xs"
-          >
-            <Save className="w-3.5 h-3.5" />
-            保存
-          </button>
-        </div>
+        <button
+          onClick={startAdding}
+          disabled={!!adding}
+          className="btn-ghost text-xs"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          添加一条
+        </button>
       </div>
     </section>
+  );
+}
+
+/**
+ * One row in the memory list. Inline-editable text + toggle + delete.
+ * The text input commits on blur or Enter (consistent with the new-row
+ * behavior). The toggle is the "is this in the system prompt right now?"
+ * checkbox — the whole point of the rewrite.
+ */
+function MemoryRow({
+  entry,
+  onToggle,
+  onCommitText,
+  onDelete,
+}: {
+  entry: GlobalMemoryEntry;
+  onToggle: () => void;
+  onCommitText: (text: string) => void;
+  onDelete: () => void;
+}) {
+  // Local edit buffer so typing doesn't pay for a serialize-deserialize on
+  // every keystroke. Synced from props when the underlying store changes
+  // (e.g. user re-enabled and the row identity stayed but text didn't).
+  const [draft, setDraft] = useState(entry.text);
+  useEffect(() => {
+    setDraft(entry.text);
+  }, [entry.text]);
+
+  const dirty = draft !== entry.text;
+
+  return (
+    <div
+      className={cn(
+        'flex items-start gap-2 px-3 py-2',
+        entry.disabled && 'bg-black/[0.02] dark:bg-white/[0.02]',
+      )}
+    >
+      <button
+        type="button"
+        onClick={onToggle}
+        className={cn(
+          'mt-1 shrink-0 p-0.5 rounded hover:bg-black/[0.06] dark:hover:bg-white/[0.06]',
+          entry.disabled
+            ? 'text-claude-muted dark:text-night-muted'
+            : 'text-emerald-600 dark:text-emerald-400',
+        )}
+        title={entry.disabled ? '已禁用 · 点击启用' : '已启用 · 点击禁用'}
+        aria-label={entry.disabled ? '启用这条记忆' : '禁用这条记忆'}
+      >
+        {entry.disabled ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+      </button>
+
+      <input
+        type="text"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => {
+          if (dirty) onCommitText(draft);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            (e.target as HTMLInputElement).blur();
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            setDraft(entry.text);
+            (e.target as HTMLInputElement).blur();
+          }
+        }}
+        className={cn(
+          'flex-1 bg-transparent text-sm font-mono focus:outline-none px-1 py-1',
+          entry.disabled && 'line-through text-claude-muted dark:text-night-muted',
+        )}
+      />
+
+      <button
+        type="button"
+        onClick={onDelete}
+        className="mt-1 shrink-0 p-0.5 rounded text-claude-muted hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30"
+        title="删除这条记忆"
+        aria-label="删除"
+      >
+        <Trash2 className="w-3.5 h-3.5" />
+      </button>
+    </div>
   );
 }
 
