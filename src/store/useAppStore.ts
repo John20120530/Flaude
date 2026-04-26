@@ -104,6 +104,21 @@ export interface PendingWrite {
   submittedAt: number;
 }
 
+/**
+ * A pending `exit_plan_mode` tool call — the agent has produced a plan and
+ * is waiting for the user to approve, ask for revisions, or reject. Same
+ * lifecycle pattern as PendingWrite (see writeApproval.ts) — the resolver
+ * lives in a module-level Map in src/lib/planMode.ts.
+ */
+export interface PendingPlan {
+  id: string;
+  /** Conversation this plan belongs to (so we don't surface plans on other tabs). */
+  conversationId: string;
+  /** Markdown text of the plan the agent produced. */
+  plan: string;
+  submittedAt: number;
+}
+
 interface AppState {
   // UI state
   theme: Theme;
@@ -162,6 +177,14 @@ interface AppState {
    * file for the bridge.
    */
   pendingWrites: PendingWrite[];
+
+  /**
+   * Pending `exit_plan_mode` approvals. Each entry represents a paused
+   * tool call where the agent produced a plan and is waiting for the
+   * user to approve / give feedback / reject. Same FIFO + transient
+   * semantics as `pendingWrites`. Bridge lives in src/lib/planMode.ts.
+   */
+  pendingPlans: PendingPlan[];
 
   /**
    * Agent self-managed TODO lists, keyed by conversation id. Written by the
@@ -327,6 +350,11 @@ interface AppState {
    *  after the user clicks Apply or Reject. */
   removePendingWrite: (id: string) => void;
 
+  /** Append a pending plan approval. Called from planMode.ts. */
+  enqueuePendingPlan: (pp: PendingPlan) => void;
+  /** Drop the resolved plan from the queue. Called from planMode.ts. */
+  removePendingPlan: (id: string) => void;
+
   /**
    * Replace the todo list for a conversation (full-list write, matching the
    * `todo_write` tool semantics). Passing an empty array clears the list,
@@ -431,6 +459,7 @@ export const useAppStore = create<AppState>()(
       allowFileWrites: false,
       allowShellExec: false,
       pendingWrites: [],
+      pendingPlans: [],
       conversationTodos: {},
 
       globalMemory: '',
@@ -1019,6 +1048,13 @@ export const useAppStore = create<AppState>()(
           pendingWrites: s.pendingWrites.filter((p) => p.id !== id),
         })),
 
+      enqueuePendingPlan: (pp) =>
+        set((s) => ({ pendingPlans: [...s.pendingPlans, pp] })),
+      removePendingPlan: (id) =>
+        set((s) => ({
+          pendingPlans: s.pendingPlans.filter((p) => p.id !== id),
+        })),
+
       setConversationTodos: (conversationId, todos) =>
         set((s) => {
           // Empty list → drop the key entirely so selectors that test
@@ -1123,6 +1159,7 @@ export const useAppStore = create<AppState>()(
           globalMemory: '',
           conversationTodos: {},
           pendingWrites: [],
+          pendingPlans: [],
           // Sync bookkeeping
           lastSyncAt: null,
           dirtyConversationIds: [],

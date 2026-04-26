@@ -20,6 +20,7 @@ import {
   MicOff,
   Image as ImageIcon,
   FileText,
+  Map as MapIcon,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Attachment, SlashCommand } from '@/types';
@@ -35,7 +36,11 @@ import { useSpeechRecognition } from '@/lib/speech';
 import { extractAttachment } from '@/lib/fileExtraction';
 
 interface Props {
-  onSend: (text: string, attachments: Attachment[]) => void;
+  onSend: (
+    text: string,
+    attachments: Attachment[],
+    options?: { planMode?: boolean },
+  ) => void;
   onStop?: () => void;
   streaming?: boolean;
   placeholder?: string;
@@ -71,6 +76,13 @@ export default function Composer({
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [slashIdx, setSlashIdx] = useState(0);
   const [helpOpen, setHelpOpen] = useState(false);
+  /**
+   * Per-message Plan-mode toggle. Resets to false after each send so the
+   * mode applies to exactly one turn — matching how the user expects "I
+   * want a plan for this specific request" to work. If they want plan
+   * mode for the whole conversation, they re-toggle each message.
+   */
+  const [planMode, setPlanMode] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -197,6 +209,9 @@ export default function Composer({
   const resetComposer = () => {
     setText('');
     setAttachments([]);
+    // Plan mode is a per-message intent — reset on every send. If the user
+    // wants the next message to also be planned, they re-toggle.
+    setPlanMode(false);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
   };
 
@@ -252,11 +267,11 @@ export default function Composer({
         input: parsed.input,
         clipboard,
       });
-      onSend(expanded, attachments);
+      onSend(expanded, attachments, { planMode });
       resetComposer();
       return;
     }
-    onSend(text, attachments);
+    onSend(text, attachments, { planMode });
     resetComposer();
   };
 
@@ -631,6 +646,33 @@ export default function Composer({
                   {thinkingOn && (
                     <span className="ml-1 text-xs">思考</span>
                   )}
+                </button>
+              )}
+              {/*
+                Plan-mode toggle — only meaningful in Code mode (where there
+                ARE destructive tools to gate). One-shot: applies to the next
+                message and auto-resets on send. Visual language: blue-tint
+                pill when on, matches the thinking toggle pattern.
+              */}
+              {activeConv?.mode === 'code' && (
+                <button
+                  onClick={() => setPlanMode((v) => !v)}
+                  className={cn(
+                    'btn-ghost',
+                    planMode &&
+                      'bg-sky-500/10 text-sky-600 dark:text-sky-400 hover:bg-sky-500/15'
+                  )}
+                  aria-label={planMode ? '关闭 Plan 模式' : '开启 Plan 模式'}
+                  aria-pressed={planMode}
+                  title={
+                    planMode
+                      ? 'Plan 模式：开 · 下一条消息会先出计划等你批准，副作用工具锁定。再点关闭。'
+                      : 'Plan 模式：关 · 点击开启，下一条消息会让 agent 先列计划再执行'
+                  }
+                  disabled={disabled}
+                >
+                  <MapIcon className="w-4 h-4" />
+                  {planMode && <span className="ml-1 text-xs">Plan</span>}
                 </button>
               )}
               {/* Compress history — hidden for short conversations where it

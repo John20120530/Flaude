@@ -10,6 +10,11 @@ import {
 } from '@/lib/tokenEstimate';
 import { summarizeConversation } from '@/lib/conversationSummary';
 import { DESIGN_VISION_FALLBACK_MODEL } from '@/config/providers';
+import {
+  PLAN_MODE_PROMPT,
+  isDestructiveToolName,
+} from '@/lib/planModeRuntime';
+import { requestPlanApproval } from '@/lib/planMode';
 import type {
   Attachment,
   Conversation,
@@ -108,6 +113,23 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
    */
   const [compressing, setCompressing] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+
+  /**
+   * Plan-mode turn state. Lives only for the duration of a single user→model
+   * turn; reset on every new send.
+   *
+   *   'inactive' → user did not enable Plan for this turn (default)
+   *   'planning' → user enabled Plan; destructive tools blocked, agent must
+   *                call exit_plan_mode before fs_write/shell_exec
+   *   'approved' → user clicked Approve in the modal; destructive tools
+   *                unlocked for the remainder of this turn
+   *
+   * Stored in a ref (not state) because the chat loop reads it
+   * synchronously inside the tool dispatch — a state update wouldn't be
+   * visible until the next render cycle, by which time the tool would
+   * already have executed.
+   */
+  const planTurnStateRef = useRef<'inactive' | 'planning' | 'approved'>('inactive');
 
   /** The current model's context window (tokens). Undefined if not found. */
   const contextWindow = useMemo(() => {
@@ -377,11 +399,36 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
               args = tc.arguments as Record<string, unknown>;
             }
           }
+          // Plan-mode gate: while the agent is between "user enabled Plan"
+          // and "user clicked Approve", reject destructive tools with a
+          // helpful message. The model adjusts and either calls a read-
+          // only tool, refines the plan, or invokes exit_plan_mode.
+          if (
+            planTurnStateRef.current === 'planning' &&
+            isDestructiveToolName(tc.name)
+          ) {
+            throw new Error(
+              `工具 "${tc.name}" 在 Plan 模式中被锁定。请先调用 exit_plan_mode 提交计划，等用户批准后再执行副作用操作。`,
+            );
+          }
           resultText = await executeTool(tc.name, args, {
             conversationId: conversation.id,
             signal: controller.signal,
             upsertArtifact: upsertArtifactAdapter,
             setTodos: setTodosAdapter,
+            requestPlanApproval: async (plan: string) => {
+              const result = await requestPlanApproval({
+                conversationId: conversation.id,
+                plan,
+              });
+              if (result.kind === 'approved') {
+                // Unlock destructive tools for the rest of this turn.
+                planTurnStateRef.current = 'approved';
+              }
+              // 'feedback' / 'rejected' keep the gate engaged — the model
+              // either revises and re-submits, or stops touching anything.
+              return result;
+            },
           });
           tc.status = 'success';
           tc.result = resultText;
@@ -572,8 +619,17 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
   );
 
   const send = useCallback(
-    async (text: string, attachments: Attachment[] = []) => {
+    async (
+      text: string,
+      attachments: Attachment[] = [],
+      options?: { planMode?: boolean },
+    ) => {
       if (streaming || compressing) return;
+
+      // Set per-turn plan state BEFORE awaiting auto-compress, so the loop
+      // sees the right state when tool calls start firing. Reset to
+      // 'inactive' on every send so a previous turn's state can't leak.
+      planTurnStateRef.current = options?.planMode ? 'planning' : 'inactive';
 
       // Step 1: auto-compress if the pending payload would overflow.
       await maybeAutoCompress(text);
@@ -621,7 +677,13 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
         ...current.messages.slice(skip),
         userMsg,
       ];
-      const fullSystem = composeSystemWithSummary(systemPrompt, current.summary);
+      // System prompt for this turn. When Plan mode is on, append the
+      // PLAN_MODE_PROMPT directive — the existing prompt still wins for
+      // identity / mode / project rules; the directive layers on top.
+      const baseSystem = composeSystemWithSummary(systemPrompt, current.summary);
+      const fullSystem = options?.planMode
+        ? (baseSystem ?? '') + PLAN_MODE_PROMPT
+        : baseSystem;
 
       await runTurn(historyToSend, assistantMsg.id, fullSystem, modelOverride);
     },

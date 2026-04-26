@@ -6,6 +6,7 @@ import ArtifactsPanel from './ArtifactsPanel';
 import ConflictToasts from './ConflictToasts';
 import UpdateBanner from './UpdateBanner';
 import WriteApprovalModal from '@/components/code/WriteApprovalModal';
+import PlanApprovalModal from '@/components/code/PlanApprovalModal';
 import { cn } from '@/lib/utils';
 
 export default function AppShell() {
@@ -102,6 +103,13 @@ export default function AppShell() {
         cost of "always mounted" is effectively zero.
       */}
       <WriteApprovalModal />
+      {/*
+        PlanApprovalModal — surfaces a pending exit_plan_mode call. Same
+        always-mounted-but-renders-null-when-empty pattern as the write
+        modal. The two are independent queues; they can both be active
+        but the user only sees one at a time (rare in practice).
+      */}
+      <PlanApprovalModal />
       {/*
         Desktop-only auto-update banner. Self-guards on isTauri() and on a
         null manifest, so it's free to leave mounted everywhere.
