@@ -1,0 +1,192 @@
+/**
+ * Wire-format serialization for outgoing chat completions.
+ *
+ * This module exists separately from providerClient.ts so the (subtle, easy
+ * to break) message-shaping logic can be unit-tested without spinning up
+ * fetch / SSE plumbing. providerClient.ts re-exports `serializeMessages`
+ * to keep the public surface untouched.
+ *
+ * Wire format target: OpenAI-compatible chat/completions. Quirks we work
+ * around:
+ *   - DeepSeek thinking-mode requires `reasoning_content` to be echoed on
+ *     the next assistant message of every turn (and inside the
+ *     tool-calls branch). Other providers ignore the field.
+ *   - Multimodal `image_url` parts only work for vision-capable models.
+ *     We send them when the user attached images and trust the routing
+ *     layer to point at a vision model.
+ *   - **Text attachments** (PDFs, code files, plain text) are rendered as
+ *     a fenced section appended to the user message text — that path
+ *     works on every provider, no vision support needed.
+ */
+
+import type { Attachment, Message } from '@/types';
+
+export type WireMessage = {
+  role: string;
+  content: unknown;
+  tool_call_id?: string;
+  tool_calls?: unknown;
+  name?: string;
+  /**
+   * DeepSeek thinking-mode echo. Required on assistant messages whose
+   * previous turn produced reasoning content; ignored by other providers.
+   */
+  reasoning_content?: string;
+};
+
+export function serializeMessages(messages: Message[], system?: string): WireMessage[] {
+  const out: WireMessage[] = [];
+  if (system) out.push({ role: 'system', content: system });
+
+  for (const m of messages) {
+    if (m.role === 'tool') {
+      out.push({
+        role: 'tool',
+        tool_call_id: m.toolCalls?.[0]?.id,
+        content: m.content,
+      });
+      continue;
+    }
+
+    if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
+      // An assistant turn that requested tool calls. OpenAI wants `tool_calls`
+      // on the message itself; `content` may be empty.
+      const msg: WireMessage = {
+        role: 'assistant',
+        content: m.content || null,
+        tool_calls: m.toolCalls.map((tc) => ({
+          id: tc.id,
+          type: 'function',
+          function: {
+            name: tc.name,
+            arguments: serializeToolArgs(tc.arguments),
+          },
+        })),
+      };
+      if (m.reasoning) msg.reasoning_content = m.reasoning;
+      out.push(msg);
+      continue;
+    }
+
+    out.push(serializeContentMessage(m));
+  }
+  return out;
+}
+
+/**
+ * Build a non-tool-call message. Splits attachments into images (multimodal
+ * `image_url` parts) and text (a markdown fence appended to the body).
+ *
+ * Output shape:
+ *   - No attachments         → `{ content: string }`
+ *   - Image-only attachments → `{ content: [text-part, image-part, ...] }`
+ *   - Text-only attachments  → `{ content: string }` with appended fences
+ *   - Mixed                  → `{ content: [merged-text-part, image-part, ...] }`
+ *
+ * The merged-text path matters for vision-capable models: when the user
+ * pastes a screenshot AND a CSV, we want both to be visible — image as a
+ * vision part, CSV as text inside the same multimodal message.
+ */
+function serializeContentMessage(m: Message): WireMessage {
+  const attachments = m.attachments ?? [];
+  const images = attachments.filter(isImageAttachment);
+  const texts = attachments.filter(isTextAttachment);
+
+  const bodyText = mergeAttachmentText(m.content ?? '', texts);
+
+  if (images.length === 0) {
+    const msg: WireMessage = { role: m.role, content: bodyText };
+    if (m.role === 'assistant' && m.reasoning) msg.reasoning_content = m.reasoning;
+    return msg;
+  }
+
+  const parts: unknown[] = [{ type: 'text', text: bodyText }];
+  for (const a of images) {
+    if (a.data) parts.push({ type: 'image_url', image_url: { url: a.data } });
+  }
+  const msg: WireMessage = { role: m.role, content: parts };
+  if (m.role === 'assistant' && m.reasoning) msg.reasoning_content = m.reasoning;
+  return msg;
+}
+
+/** Image attachment for wire purposes: explicit kind='image', or legacy (no kind, image mime). */
+function isImageAttachment(a: Attachment): boolean {
+  if (a.kind === 'image') return true;
+  if (a.kind === 'text') return false;
+  return a.mimeType.startsWith('image/') && !!a.data;
+}
+
+function isTextAttachment(a: Attachment): boolean {
+  return a.kind === 'text' && typeof a.text === 'string' && a.text.length > 0;
+}
+
+/**
+ * Append text attachments to the user's message content. Renders each as a
+ * labeled fenced block; the model has been observed to handle this format
+ * cleanly across DeepSeek / Qwen / GLM / Kimi without explicit prompt help.
+ *
+ * Empty body + text attachments is fine — the fences carry the content.
+ */
+function mergeAttachmentText(body: string, texts: Attachment[]): string {
+  if (texts.length === 0) return body;
+  const blocks: string[] = [];
+  for (const a of texts) {
+    const lang = languageHintFor(a);
+    const truncatedNote = a.textTruncated ? '（已截断）' : '';
+    blocks.push(
+      `**附件: ${a.name}**${truncatedNote}\n\`\`\`${lang}\n${a.text ?? ''}\n\`\`\``,
+    );
+  }
+  const merged = blocks.join('\n\n');
+  return body.trim() ? `${body}\n\n${merged}` : merged;
+}
+
+/**
+ * Best-effort code-fence language hint based on filename extension. The model
+ * doesn't strictly need it (it can infer from content) but a correct hint
+ * makes Markdown rendering on the *user's* side prettier when they revisit
+ * the conversation.
+ */
+function languageHintFor(a: Attachment): string {
+  const i = a.name.lastIndexOf('.');
+  if (i < 0) return '';
+  const ext = a.name.slice(i + 1).toLowerCase();
+  // Only hint a few cases — over-mapping is worse than no hint, since wrong
+  // hints get inherited into the chat-side renderer's syntax highlighter.
+  const map: Record<string, string> = {
+    js: 'javascript', cjs: 'javascript', mjs: 'javascript',
+    jsx: 'jsx',
+    ts: 'typescript', cts: 'typescript', mts: 'typescript',
+    tsx: 'tsx',
+    py: 'python', pyi: 'python',
+    rb: 'ruby', go: 'go', rs: 'rust', java: 'java', kt: 'kotlin',
+    c: 'c', h: 'c', cpp: 'cpp', cc: 'cpp', hpp: 'cpp',
+    cs: 'csharp', swift: 'swift', php: 'php',
+    sh: 'bash', bash: 'bash', zsh: 'bash', ps1: 'powershell',
+    json: 'json', yaml: 'yaml', yml: 'yaml', toml: 'toml',
+    xml: 'xml', html: 'html', css: 'css', scss: 'scss', less: 'less',
+    sql: 'sql', md: 'markdown', csv: 'csv',
+    pdf: '', // already extracted to plain text
+    txt: '', log: '',
+  };
+  return map[ext] ?? '';
+}
+
+/**
+ * Tool-call arguments round-trip as a JSON string over the wire. Internal
+ * storage is either a parsed object, a `{__raw: string}` wrapper (mid-stream),
+ * or a string. Normalize to a string.
+ */
+export function serializeToolArgs(args: unknown): string {
+  if (typeof args === 'string') return args;
+  if (args && typeof args === 'object') {
+    const raw = (args as { __raw?: string }).__raw;
+    if (typeof raw === 'string') return raw;
+    try {
+      return JSON.stringify(args);
+    } catch {
+      return '{}';
+    }
+  }
+  return '{}';
+}

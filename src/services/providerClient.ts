@@ -22,6 +22,7 @@
 import type { Message, StreamChunk, ToolCall } from '@/types';
 import { useAppStore } from '@/store/useAppStore';
 import { authFetch, FlaudeApiError, getServerUrl } from '@/lib/flaudeApi';
+import { serializeMessages } from './wireFormat';
 
 export interface ChatRequest {
   modelId: string;
@@ -91,100 +92,6 @@ function lookupModel(modelId: string) {
     if (m) return m;
   }
   return null;
-}
-
-/** Convert internal Message[] to OpenAI wire format. */
-function serializeMessages(messages: Message[], system?: string) {
-  const out: Array<{
-    role: string;
-    content: unknown;
-    tool_call_id?: string;
-    tool_calls?: unknown;
-    name?: string;
-    /**
-     * DeepSeek thinking-mode echo. Required on assistant messages whose
-     * previous turn produced reasoning content; ignored by other providers.
-     * See the comment in the assistant-with-tool-calls branch below.
-     */
-    reasoning_content?: string;
-  }> = [];
-  if (system) out.push({ role: 'system', content: system });
-  for (const m of messages) {
-    if (m.role === 'tool') {
-      // A tool result — references the original call by id.
-      out.push({
-        role: 'tool',
-        tool_call_id: m.toolCalls?.[0]?.id,
-        content: m.content,
-      });
-      continue;
-    }
-    if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
-      // An assistant turn that requested tool calls. OpenAI wants `tool_calls`
-      // on the message itself; `content` may be empty.
-      const msg: (typeof out)[number] = {
-        role: 'assistant',
-        content: m.content || null,
-        tool_calls: m.toolCalls.map((tc) => ({
-          id: tc.id,
-          type: 'function',
-          function: {
-            name: tc.name,
-            arguments: serializeToolArgs(tc.arguments),
-          },
-        })),
-      };
-      // DeepSeek thinking-mode rule: when the model produced reasoning_content
-      // on a previous turn, the *very next* API call must echo it back inside
-      // the same assistant message — otherwise the upstream returns 400 with
-      // "The reasoning_content in the thinking mode must be passed back to
-      // the API.". Other providers (Qwen, GLM, Kimi) silently ignore the
-      // extra field, so it's safe to always include when we have it.
-      if (m.reasoning) msg.reasoning_content = m.reasoning;
-      out.push(msg);
-      continue;
-    }
-    // Multimodal content for vision-capable models
-    if (m.attachments && m.attachments.length > 0) {
-      const parts: unknown[] = [{ type: 'text', text: m.content }];
-      for (const a of m.attachments) {
-        if (a.mimeType.startsWith('image/') && a.data) {
-          parts.push({ type: 'image_url', image_url: { url: a.data } });
-        }
-      }
-      const msg: (typeof out)[number] = { role: m.role, content: parts };
-      if (m.role === 'assistant' && m.reasoning) {
-        msg.reasoning_content = m.reasoning;
-      }
-      out.push(msg);
-    } else {
-      const msg: (typeof out)[number] = { role: m.role, content: m.content };
-      if (m.role === 'assistant' && m.reasoning) {
-        msg.reasoning_content = m.reasoning;
-      }
-      out.push(msg);
-    }
-  }
-  return out;
-}
-
-/**
- * Tool-call arguments round-trip as a JSON string over the wire. Our internal
- * storage is either a parsed object, a `{__raw: string}` wrapper (mid-stream),
- * or a string. Normalize to a string.
- */
-function serializeToolArgs(args: unknown): string {
-  if (typeof args === 'string') return args;
-  if (args && typeof args === 'object') {
-    const raw = (args as { __raw?: string }).__raw;
-    if (typeof raw === 'string') return raw;
-    try {
-      return JSON.stringify(args);
-    } catch {
-      return '{}';
-    }
-  }
-  return '{}';
 }
 
 /** Stream chat completions. Yields deltas as they arrive. */

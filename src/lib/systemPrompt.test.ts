@@ -144,4 +144,83 @@ describe('composeSystemPrompt', () => {
     expect(skillIdx).toBeGreaterThan(memIdx);
     expect(projIdx).toBeGreaterThan(skillIdx);
   });
+
+  describe('workspaceMemory injection', () => {
+    it('injects FLAUDE.md content under a workspace section', () => {
+      const out = composeSystemPrompt({
+        basePrompt: BASE,
+        mode: 'code',
+        workspaceMemory: {
+          filename: 'FLAUDE.md',
+          content: 'Use pnpm. Build via `pnpm tauri:dev`.',
+        },
+      });
+      expect(out).toContain('## 工作区约定（FLAUDE.md）');
+      expect(out).toContain('Use pnpm. Build via `pnpm tauri:dev`.');
+    });
+
+    it('uses the actual filename in the heading (CLAUDE.md fallback)', () => {
+      const out = composeSystemPrompt({
+        basePrompt: BASE,
+        mode: 'code',
+        workspaceMemory: { filename: 'CLAUDE.md', content: '- be terse' },
+      });
+      expect(out).toContain('## 工作区约定（CLAUDE.md）');
+      expect(out).not.toContain('## 工作区约定（FLAUDE.md）');
+    });
+
+    it('omits the workspace section when workspaceMemory is undefined', () => {
+      const out = composeSystemPrompt({ basePrompt: BASE, mode: 'code' });
+      expect(out).not.toContain('## 工作区约定');
+    });
+
+    it('omits the workspace section when content is whitespace-only', () => {
+      const out = composeSystemPrompt({
+        basePrompt: BASE,
+        mode: 'code',
+        workspaceMemory: { filename: 'FLAUDE.md', content: '   \n\n  ' },
+      });
+      expect(out).not.toContain('## 工作区约定');
+    });
+
+    it('places workspace memory after global memory and before skills', () => {
+      // The order matters: workspace conventions are project-level facts
+      // that should override generic skill defaults but sit under the user's
+      // own persistent memory.
+      const out = composeSystemPrompt({
+        basePrompt: BASE,
+        mode: 'code',
+        globalMemory: '- I prefer Vim',
+        workspaceMemory: {
+          filename: 'FLAUDE.md',
+          content: 'Project uses 2-space indent.',
+        },
+        skills: [skill({ name: 'lint-skill', modes: [] })],
+      });
+      const memIdx = out.indexOf('## 用户记忆');
+      const wsIdx = out.indexOf('## 工作区约定');
+      const skillIdx = out.indexOf('## 可用技能');
+      expect(memIdx).toBeGreaterThan(0);
+      expect(wsIdx).toBeGreaterThan(memIdx);
+      expect(skillIdx).toBeGreaterThan(wsIdx);
+    });
+
+    it('coexists with project instructions without conflict (both render)', () => {
+      const out = composeSystemPrompt({
+        basePrompt: BASE,
+        mode: 'code',
+        workspaceMemory: { filename: 'FLAUDE.md', content: 'workspace fact' },
+        project: {
+          id: 'p',
+          name: 'MyProj',
+          instructions: 'project instruction',
+          sources: [],
+          createdAt: 0,
+          updatedAt: 0,
+        },
+      });
+      expect(out).toContain('workspace fact');
+      expect(out).toContain('project instruction');
+    });
+  });
 });

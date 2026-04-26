@@ -4,13 +4,27 @@ export type WorkMode = 'chat' | 'code' | 'design';
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 
+/**
+ * `kind` distinguishes how the attachment is forwarded to the model:
+ *   - 'image' → multimodal `image_url` part (vision-capable models only)
+ *   - 'text'  → injected as a fenced text block in the user message
+ *
+ * Older messages persisted before this field existed had only image-type
+ * attachments, so `kind` is optional; readers should treat undefined as
+ * 'image' for backward compatibility (see wireFormat.ts).
+ */
 export interface Attachment {
   id: string;
   name: string;
   mimeType: string;
   size: number;
-  /** Base64 or blob URL — varies by transport. */
+  kind?: 'image' | 'text';
+  /** Image: base64 data URL. Unset for text attachments. */
   data?: string;
+  /** Text: extracted plain-text contents (already capped + truncated). True if so. */
+  text?: string;
+  /** Set when `text` was truncated to fit the per-attachment cap. */
+  textTruncated?: boolean;
   url?: string;
 }
 

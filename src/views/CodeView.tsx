@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   Terminal as TerminalIcon,
@@ -9,6 +9,8 @@ import {
   Eye,
   EyeOff,
   X,
+  FileText,
+  RefreshCw,
 } from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
 import MessageList from '@/components/chat/MessageList';
@@ -21,6 +23,11 @@ import { useStreamedChat } from '@/hooks/useStreamedChat';
 import { cn } from '@/lib/utils';
 import { isTauri, pickFolder } from '@/lib/tauri';
 import { composeSystemPrompt } from '@/lib/systemPrompt';
+import {
+  loadWorkspaceMemory,
+  WORKSPACE_MEMORY_FILENAMES,
+  type WorkspaceMemory,
+} from '@/lib/workspaceMemory';
 
 const CODE_BASE_PROMPT_WITH_WORKSPACE = `你是 Flaude 的 Code Agent，对标 Claude Code。专注于软件工程任务。
 - 读代码前先浏览目录结构；改代码前先读现有实现。
@@ -68,6 +75,49 @@ export default function CodeView() {
     [conversation?.projectId, projects]
   );
 
+  // Workspace memory (FLAUDE.md / CLAUDE.md at the workspace root). Reloaded
+  // when the workspace changes and when the window is focused — that second
+  // trigger means edits made in an external editor show up the next time
+  // the user clicks back into Flaude, no manual refresh required. We also
+  // expose a manual refresh button on the badge for users who want to
+  // verify a change before sending.
+  const [workspaceMemory, setWorkspaceMemory] = useState<WorkspaceMemory | null>(
+    null
+  );
+  const [memoryLoading, setMemoryLoading] = useState(false);
+
+  const reloadWorkspaceMemory = useCallback(async () => {
+    setMemoryLoading(true);
+    try {
+      const mem = await loadWorkspaceMemory(workspacePath);
+      setWorkspaceMemory(mem);
+    } finally {
+      setMemoryLoading(false);
+    }
+  }, [workspacePath]);
+
+  useEffect(() => {
+    void reloadWorkspaceMemory();
+  }, [reloadWorkspaceMemory]);
+
+  // Re-read on window focus so external edits to FLAUDE.md show up without
+  // a manual refresh. Cheap (a single Tauri IPC + small file read), runs
+  // only when the window genuinely regained focus.
+  useEffect(() => {
+    if (!workspacePath) return;
+    const onVis = () => {
+      if (document.visibilityState === 'visible') {
+        void reloadWorkspaceMemory();
+      }
+    };
+    window.addEventListener('focus', onVis);
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      window.removeEventListener('focus', onVis);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [workspacePath, reloadWorkspaceMemory]);
+
   const systemPrompt = useMemo(
     () =>
       composeSystemPrompt({
@@ -79,10 +129,13 @@ export default function CodeView() {
           : CODE_BASE_PROMPT_NO_WORKSPACE,
         mode: 'code',
         globalMemory,
+        workspaceMemory: workspaceMemory
+          ? { filename: workspaceMemory.filename, content: workspaceMemory.content }
+          : undefined,
         skills,
         project,
       }),
-    [project, globalMemory, skills, workspacePath]
+    [project, globalMemory, skills, workspacePath, workspaceMemory]
   );
 
   useEffect(() => {
@@ -162,6 +215,11 @@ export default function CodeView() {
               >
                 {workspacePath}
               </div>
+              <WorkspaceMemoryBadge
+                memory={workspaceMemory}
+                loading={memoryLoading}
+                onRefresh={reloadWorkspaceMemory}
+              />
               <FileTree
                 key={workspacePath + (showHidden ? ':hidden' : '')}
                 workspace={workspacePath}
@@ -298,6 +356,75 @@ export default function CodeView() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Small status pill shown above the FileTree in Code mode. Its job is to
+ * make the (otherwise invisible) workspace-memory injection legible:
+ * the user should be able to glance at it and know whether a FLAUDE.md /
+ * CLAUDE.md is being merged into the system prompt right now.
+ *
+ * States:
+ *   - loading            → refresh icon spins, label still reflects last state
+ *   - found, normal      → green "FLAUDE.md · 2.1 KB"
+ *   - found, truncated   → amber "FLAUDE.md · 102 KB · 已截断"
+ *   - not found          → muted "未找到 FLAUDE.md / CLAUDE.md"
+ */
+function WorkspaceMemoryBadge({
+  memory,
+  loading,
+  onRefresh,
+}: {
+  memory: WorkspaceMemory | null;
+  loading: boolean;
+  onRefresh: () => void;
+}) {
+  const candidates = WORKSPACE_MEMORY_FILENAMES.join(' / ');
+  const sizeLabel = memory
+    ? memory.sizeBytes < 1024
+      ? `${memory.sizeBytes} B`
+      : `${(memory.sizeBytes / 1024).toFixed(1)} KB`
+    : '';
+
+  return (
+    <div
+      className={cn(
+        'px-3 py-1.5 text-[11px] flex items-center gap-1.5',
+        'border-b border-claude-border/50 dark:border-night-border/50',
+        memory
+          ? memory.truncated
+            ? 'bg-amber-50/40 dark:bg-amber-950/20 text-amber-800 dark:text-amber-300'
+            : 'bg-emerald-50/40 dark:bg-emerald-950/20 text-emerald-800 dark:text-emerald-300'
+          : 'text-claude-muted dark:text-night-muted'
+      )}
+      title={
+        memory
+          ? `${memory.filename} 已注入到 Code 模式 system prompt（${sizeLabel}${memory.truncated ? '，已截断' : ''}）。外部编辑器改这个文件、回到 Flaude 时会自动重新加载；点刷新按钮也可立即重读。`
+          : `在工作区根目录创建 ${candidates}（前者优先），写下项目约定（构建命令、命名规范、避免改动的目录等），Flaude 会自动注入到 Code 模式 system prompt。`
+      }
+    >
+      <FileText className="w-3 h-3 shrink-0" />
+      <span className="truncate flex-1 min-w-0">
+        {memory
+          ? `${memory.filename} · ${sizeLabel}${memory.truncated ? ' · 已截断' : ''}`
+          : `未找到 ${candidates}`}
+      </span>
+      <button
+        type="button"
+        onClick={onRefresh}
+        disabled={loading}
+        className={cn(
+          'shrink-0 p-0.5 rounded hover:bg-black/[0.06] dark:hover:bg-white/[0.06]',
+          'disabled:opacity-50',
+          loading && 'animate-spin'
+        )}
+        title={memory ? '重新加载' : '检查文件是否已创建'}
+        aria-label="重新加载 workspace memory"
+      >
+        <RefreshCw className="w-3 h-3" />
+      </button>
     </div>
   );
 }

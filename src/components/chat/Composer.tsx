@@ -1,6 +1,26 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type KeyboardEvent,
+} from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Paperclip, ArrowUp, Square, Slash, X, Archive, Loader2, Brain, Mic, MicOff } from 'lucide-react';
+import {
+  Paperclip,
+  ArrowUp,
+  Square,
+  Slash,
+  X,
+  Archive,
+  Loader2,
+  Brain,
+  Mic,
+  MicOff,
+  Image as ImageIcon,
+  FileText,
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Attachment, SlashCommand } from '@/types';
 import { uid } from '@/lib/utils';
@@ -12,6 +32,7 @@ import {
   suggestCommands,
 } from '@/lib/slashCommands';
 import { useSpeechRecognition } from '@/lib/speech';
+import { extractAttachment } from '@/lib/fileExtraction';
 
 interface Props {
   onSend: (text: string, attachments: Attachment[]) => void;
@@ -311,39 +332,62 @@ export default function Composer({
     }
   };
 
-  const onFiles = async (files: FileList | null) => {
+  const onFiles = async (files: FileList | File[] | null) => {
     if (!files) return;
+    const arr = Array.from(files);
+    if (arr.length === 0) return;
     const list: Attachment[] = [];
     const rejected: string[] = [];
-    for (const f of Array.from(files)) {
-      // Hard cap per file: above this, reading to data URL + persisting state
-      // can freeze the UI (localStorage quota is ~5MB for the whole store).
-      if (f.size > MAX_ATTACHMENT_BYTES) {
-        rejected.push(`${f.name} 太大（${formatBytes(f.size)}，上限 ${formatBytes(MAX_ATTACHMENT_BYTES)}）`);
-        continue;
-      }
-      // Only image attachments are actually forwarded to the model today
-      // (providerClient maps image/* → image_url multimodal parts). For other
-      // types we'd need a real extractor (PDF → text, docx → text, etc.).
-      if (!f.type.startsWith('image/')) {
-        rejected.push(`${f.name}：当前只支持图片附件。PDF / 文档抽取还没接，先用截图或复制正文。`);
-        continue;
-      }
+    for (const f of arr) {
       try {
-        const data = await fileToDataUrl(f);
-        list.push({
-          id: uid('att'),
-          name: f.name,
-          mimeType: f.type || 'application/octet-stream',
-          size: f.size,
-          data,
-        });
+        const result = await extractAttachment(f);
+        if (result.kind === 'unsupported') {
+          rejected.push(result.reason);
+          continue;
+        }
+        if (result.kind === 'image') {
+          list.push({
+            id: uid('att'),
+            name: f.name,
+            mimeType: f.type || 'application/octet-stream',
+            size: f.size,
+            kind: 'image',
+            data: result.dataUrl,
+          });
+        } else {
+          list.push({
+            id: uid('att'),
+            // Pasted screenshots and clipboard images often arrive as 'image.png'
+            // with no real name; pasted text files inherit the OS-set name.
+            // For text attachments without a name we synthesize one so the
+            // model has something to reference.
+            name: f.name || 'pasted.txt',
+            mimeType: f.type || 'application/octet-stream',
+            size: f.size,
+            kind: 'text',
+            text: result.text,
+            textTruncated: result.truncated,
+          });
+        }
       } catch (e) {
         rejected.push(`${f.name}：读取失败（${(e as Error).message}）`);
       }
     }
     if (rejected.length > 0) alert(rejected.join('\n'));
     if (list.length > 0) setAttachments((prev) => [...prev, ...list]);
+  };
+
+  /**
+   * Ctrl+V paste support: when the clipboard carries one or more files
+   * (screenshot tools, copy-from-Explorer, etc.), preventDefault and route
+   * them through the normal attachment path. Pure-text pastes fall through
+   * to the textarea's default behavior.
+   */
+  const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = e.clipboardData?.files;
+    if (!files || files.length === 0) return;
+    e.preventDefault();
+    void onFiles(files);
   };
 
   const removeAttachment = (id: string) =>
@@ -389,21 +433,34 @@ export default function Composer({
 
         {attachments.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-2">
-            {attachments.map((a) => (
-              <div
-                key={a.id}
-                className="flex items-center gap-2 px-2 py-1 rounded-md bg-claude-surface dark:bg-night-surface border border-claude-border dark:border-night-border text-xs"
-              >
-                <Paperclip className="w-3 h-3" />
-                <span className="truncate max-w-[160px]">{a.name}</span>
-                <button
-                  onClick={() => removeAttachment(a.id)}
-                  className="text-claude-muted hover:text-red-500"
+            {attachments.map((a) => {
+              const isImage = a.kind === 'image' || (!a.kind && a.mimeType.startsWith('image/'));
+              const Icon = isImage ? ImageIcon : FileText;
+              const meta = a.kind === 'text'
+                ? `${(a.text?.length ?? 0).toLocaleString()} 字符${a.textTruncated ? ' · 已截断' : ''}`
+                : '';
+              return (
+                <div
+                  key={a.id}
+                  className="flex items-center gap-2 px-2 py-1 rounded-md bg-claude-surface dark:bg-night-surface border border-claude-border dark:border-night-border text-xs"
+                  title={meta || a.name}
                 >
-                  ×
-                </button>
-              </div>
-            ))}
+                  <Icon className="w-3 h-3 shrink-0" />
+                  <span className="truncate max-w-[160px]">{a.name}</span>
+                  {meta && (
+                    <span className="text-claude-muted dark:text-night-muted shrink-0">
+                      {meta}
+                    </span>
+                  )}
+                  <button
+                    onClick={() => removeAttachment(a.id)}
+                    className="text-claude-muted hover:text-red-500"
+                  >
+                    ×
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -467,6 +524,7 @@ export default function Composer({
                 t.style.height = Math.min(t.scrollHeight, 240) + 'px';
               }}
               onKeyDown={onKeyDown}
+              onPaste={onPaste}
               placeholder={placeholder}
               disabled={disabled}
               className={cn(
@@ -488,7 +546,11 @@ export default function Composer({
                 ref={fileInputRef}
                 type="file"
                 multiple
-                accept="image/*"
+                // Loose accept: hint the OS picker but don't restrict —
+                // the actual filter happens in extractAttachment, which
+                // also accepts code/config files the OS reports with an
+                // empty mime type.
+                accept="image/*,text/*,.pdf,.md,.json,.yaml,.yml,.toml,.csv,.tsv,.html,.css,.js,.jsx,.ts,.tsx,.py,.rb,.go,.rs,.java,.kt,.c,.h,.cpp,.cs,.swift,.php,.sh,.sql,.xml,.ini,.conf,.log"
                 className="hidden"
                 onChange={(e) => {
                   onFiles(e.target.files);
@@ -629,21 +691,3 @@ export default function Composer({
   );
 }
 
-function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
-// Keep this well under the localStorage quota (~5MB for the whole store).
-// A 4MB image becomes ~5.3MB as base64 data URL — already pushing it.
-const MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024;
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
-}
