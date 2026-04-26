@@ -55,6 +55,8 @@ describe('serializeMessages — basics', () => {
 
 describe('serializeMessages — tool calls', () => {
   it('packages assistant tool_calls under the message and serializes args to a JSON string', () => {
+    // History needs a matching tool result, otherwise the serializer drops
+    // the tool_call as an orphan (see "orphan tool_calls" describe below).
     const out = serializeMessages([
       userMsg({
         role: 'assistant',
@@ -64,9 +66,14 @@ describe('serializeMessages — tool calls', () => {
             id: 'tc1',
             name: 'fs_read_file',
             arguments: { path: 'README.md' },
-            status: 'pending',
+            status: 'success',
           },
         ],
+      }),
+      userMsg({
+        role: 'tool',
+        content: 'file contents',
+        toolCalls: [{ id: 'tc1', name: 'fs_read_file', arguments: {}, status: 'success' }],
       }),
     ]);
     expect(out[0]).toMatchObject({
@@ -103,7 +110,12 @@ describe('serializeMessages — tool calls', () => {
         role: 'assistant',
         content: '',
         reasoning: 'plan',
-        toolCalls: [{ id: 't', name: 'x', arguments: {}, status: 'pending' }],
+        toolCalls: [{ id: 't', name: 'x', arguments: {}, status: 'success' }],
+      }),
+      userMsg({
+        role: 'tool',
+        content: 'r',
+        toolCalls: [{ id: 't', name: 'x', arguments: {}, status: 'success' }],
       }),
     ]);
     expect(out[0]).toMatchObject({ reasoning_content: 'plan' });
@@ -319,6 +331,121 @@ describe('serializeMessages — mixed image + text attachments', () => {
     expect(parts[0]?.text).toContain('**附件: config.yaml**');
     expect(parts[0]?.text).toContain('enabled: true');
     expect(parts[1]).toEqual({ type: 'image_url', image_url: { url: 'data:image/png;base64,XX' } });
+  });
+});
+
+describe('serializeMessages — orphan tool_calls (user clicked Stop mid-call)', () => {
+  it('drops a tool_call that has no matching tool message — assistant becomes plain text', () => {
+    // History: user → assistant with tool_calls but NO subsequent tool message.
+    // This is exactly the state the conversation lands in when the user hits
+    // Stop after the model emitted tool_call deltas but before execute ran.
+    const out = serializeMessages([
+      userMsg({ id: 'u', role: 'user', content: 'do X' }),
+      userMsg({
+        id: 'a',
+        role: 'assistant',
+        content: '我开始了',
+        toolCalls: [
+          { id: 'tc-orphan', name: 'todo_write', arguments: {}, status: 'pending' },
+        ],
+      }),
+    ]);
+    // Must NOT include tool_calls in the wire payload — that would 400.
+    expect(out).toHaveLength(2);
+    expect(out[1]).toEqual({ role: 'assistant', content: '我开始了' });
+    expect(out[1]).not.toHaveProperty('tool_calls');
+  });
+
+  it('skips an empty assistant message whose only tool_calls were orphans', () => {
+    // Same as above but with no text content the model produced before abort.
+    const out = serializeMessages([
+      userMsg({ id: 'u', role: 'user', content: 'do X' }),
+      userMsg({
+        id: 'a',
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          { id: 'tc-orphan', name: 'todo_write', arguments: {}, status: 'pending' },
+        ],
+      }),
+      userMsg({ id: 'u2', role: 'user', content: '换个事' }),
+    ]);
+    expect(out).toHaveLength(2); // first user, second user — assistant dropped
+    expect(out[0]?.role).toBe('user');
+    expect(out[1]?.role).toBe('user');
+    expect(out[1]?.content).toBe('换个事');
+  });
+
+  it('keeps an assistant message intact when ALL its tool_calls have matching tool messages', () => {
+    const out = serializeMessages([
+      userMsg({ id: 'u', role: 'user', content: 'do X' }),
+      userMsg({
+        id: 'a',
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          { id: 'tc-1', name: 'todo_write', arguments: {}, status: 'success' },
+          { id: 'tc-2', name: 'fs_read_file', arguments: {}, status: 'success' },
+        ],
+      }),
+      userMsg({
+        id: 't1',
+        role: 'tool',
+        content: 'result 1',
+        toolCalls: [{ id: 'tc-1', name: 'todo_write', arguments: {}, status: 'success' }],
+      }),
+      userMsg({
+        id: 't2',
+        role: 'tool',
+        content: 'result 2',
+        toolCalls: [{ id: 'tc-2', name: 'fs_read_file', arguments: {}, status: 'success' }],
+      }),
+    ]);
+    const assistant = out[1] as { tool_calls?: unknown[] };
+    expect(assistant.tool_calls).toHaveLength(2);
+  });
+
+  it('partially keeps tool_calls — drops only the orphan, keeps the responded one', () => {
+    const out = serializeMessages([
+      userMsg({ id: 'u', role: 'user', content: 'do X' }),
+      userMsg({
+        id: 'a',
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          { id: 'tc-good', name: 'fs_read_file', arguments: {}, status: 'success' },
+          { id: 'tc-orphan', name: 'todo_write', arguments: {}, status: 'pending' },
+        ],
+      }),
+      userMsg({
+        id: 't1',
+        role: 'tool',
+        content: 'file contents',
+        toolCalls: [{ id: 'tc-good', name: 'fs_read_file', arguments: {}, status: 'success' }],
+      }),
+    ]);
+    const assistant = out[1] as { tool_calls?: Array<{ id: string }> };
+    expect(assistant.tool_calls).toHaveLength(1);
+    expect(assistant.tool_calls?.[0]?.id).toBe('tc-good');
+  });
+
+  it('preserves reasoning_content on the salvaged plain-text assistant message (DeepSeek thinking-mode)', () => {
+    const out = serializeMessages([
+      userMsg({
+        id: 'a',
+        role: 'assistant',
+        content: '我想了一下',
+        reasoning: 'reasoning trace',
+        toolCalls: [
+          { id: 'tc-orphan', name: 'todo_write', arguments: {}, status: 'pending' },
+        ],
+      }),
+    ]);
+    expect(out[0]).toMatchObject({
+      role: 'assistant',
+      content: '我想了一下',
+      reasoning_content: 'reasoning trace',
+    });
   });
 });
 
