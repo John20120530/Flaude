@@ -4,6 +4,7 @@ import type { Project, Skill, WorkMode } from '@/types';
  * Compose the full system prompt for a conversation, combining:
  *   - The mode's base prompt (Chat / Code)
  *   - Global memory (CLAUDE.md-style persistent facts about the user)
+ *   - Workspace memory (FLAUDE.md / CLAUDE.md from the current workspace root)
  *   - A catalogue of skills relevant to the current mode
  *   - Any project-level instructions (project memory)
  *   - Any project knowledge files (injected as context)
@@ -11,10 +12,11 @@ import type { Project, Skill, WorkMode } from '@/types';
  * Runs on every turn so updates to memory / skills / project instructions
  * take effect immediately.
  *
- * Order matters: base → memory → skills → project instructions → project
- * knowledge. The model reads top-down, so identity (base) goes first, followed
- * by stable facts (memory), then reusable capabilities (skills), then
- * project-specific context that might override earlier defaults.
+ * Order matters: base → user memory → workspace memory → skills → project
+ * instructions → project knowledge. The model reads top-down, so identity
+ * (base) goes first, then stable facts about the user, then project-level
+ * conventions checked into the codebase, then reusable capabilities, then
+ * the active project's own context.
  */
 export function composeSystemPrompt(options: {
   basePrompt: string;
@@ -22,6 +24,11 @@ export function composeSystemPrompt(options: {
   mode: WorkMode;
   /** Global CLAUDE.md-style memory. Empty string → not injected. */
   globalMemory?: string;
+  /**
+   * Workspace memory loaded from FLAUDE.md / CLAUDE.md at the workspace root.
+   * Only meaningful in Code mode (the only mode with a workspace concept).
+   */
+  workspaceMemory?: { filename: string; content: string };
   /** User's skill library. Filtered by mode + `enabled` before injection. */
   skills?: Skill[];
   /** Active project (optional). */
@@ -33,6 +40,7 @@ export function composeSystemPrompt(options: {
     basePrompt,
     mode,
     globalMemory,
+    workspaceMemory,
     skills,
     project,
     knowledgeTokenBudget = 40_000,
@@ -48,6 +56,21 @@ export function composeSystemPrompt(options: {
         '以下是关于用户的持久事实，适用于所有对话。在回答时请考虑这些背景，但不要每次都显式复述：',
         '',
         globalMemory.trim(),
+      ].join('\n')
+    );
+  }
+
+  if (workspaceMemory && workspaceMemory.content.trim()) {
+    parts.push(
+      [
+        '',
+        `## 工作区约定（${workspaceMemory.filename}）`,
+        '',
+        '以下内容来自当前工作区根目录的 ' +
+          workspaceMemory.filename +
+          '，是这个项目专属的约定（命令、规范、目录结构、避免改动的区域等）。当用户的请求与之相关时，**优先**遵守它，而不是你的默认习惯：',
+        '',
+        workspaceMemory.content.trim(),
       ].join('\n')
     );
   }
