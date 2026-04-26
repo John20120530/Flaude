@@ -74,15 +74,24 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = [
         recommendedFor: ['chat'],
       },
       {
-        id: 'qwen-vl-max-latest',
+        id: 'qwen3-vl-plus',
         providerId: 'qwen',
-        displayName: 'Qwen-VL-Max（视觉）',
-        description: '视觉旗舰，看图说话 / 设计稿改写',
-        contextWindow: 32_000,
+        displayName: 'Qwen3-VL-Plus（视觉旗舰）',
+        description: '视觉理解 + 深度思考双模式，设计稿改写首选',
+        contextWindow: 128_000,
         capabilities: { vision: true },
         // Design picks this up automatically when an image is attached;
         // listing `recommendedFor: ['design']` keeps it discoverable in
         // the model picker for users who want to manually pin it.
+        recommendedFor: ['design'],
+      },
+      {
+        id: 'qwen3-vl-flash',
+        providerId: 'qwen',
+        displayName: 'Qwen3-VL-Flash（视觉极速）',
+        description: '小尺寸视觉理解，便宜快速；适合粗略描述图片',
+        contextWindow: 128_000,
+        capabilities: { vision: true },
         recommendedFor: ['design'],
       },
       {
@@ -201,27 +210,41 @@ export const DEFAULT_MODEL_BY_MODE: Record<'chat' | 'code' | 'design', string> =
 
 /**
  * Vision-capable model used as a fallback when a Design-mode message has
- * image attachments. V4 Pro can't see images; Qwen-VL-Max can. We auto-route
- * just that single turn through Qwen-VL-Max and bounce back to V4 Pro on
- * the next text-only turn — the user gets screenshot-redesign for free,
- * with no manual model switching.
+ * image attachments. V4 Pro can't see images; Qwen3-VL-Plus can. We
+ * auto-route just that single turn through Qwen3-VL-Plus and bounce back
+ * to V4 Pro on the next text-only turn — the user gets screenshot-redesign
+ * for free, with no manual model switching.
  *
- * **Why `-latest` and not the bare `qwen-vl-max`**: DashScope rolls the
- * snapshot pointer forward on the `-latest` alias every few months as new
- * VL releases ship; pinning a specific date (`qwen-vl-max-2024-09-19`) ages
- * out fast. If alibaba ever breaks compat we can pin to a known-good date.
+ * **Why `qwen3-vl-plus` and not Qwen-VL-Max**: as of 2026-04 Alibaba
+ * retired the `qwen-vl-max` line and rolled the flagship vision tier into
+ * Qwen3-VL-Plus, which adds a "thinking" mode on top of vision — useful
+ * when the user asks for stylistic transforms ("change to van Gogh
+ * style") that benefit from reasoning before output. The previous
+ * `qwen-vl-max-latest` ID is no longer listed on bailian.console; if a
+ * user has a stale conversation pinned to it, the upstream returns 400
+ * and we'd need a one-shot heal at rehydrate (not currently shipped —
+ * those conversations would just need a model re-pick).
  *
- * **Why not `qwen-max` (the previous default, replaced 2026-04-26)**:
+ * **Why not `qwen-max` (the original default, replaced 2026-04-26)**:
  * `qwen-max` in DashScope's OpenAI-compat mode is text-only — image_url
  * content parts get silently dropped, the model hallucinates picsum.photos
  * placeholders, and the user gets a mountain stock photo instead of a
- * redesigned screenshot. Vision lives on the dedicated `qwen-vl-*` family.
+ * redesigned screenshot. Vision lives on the dedicated `qwen3-vl-*`
+ * family. (See `git log src/config/providers.ts` for the v0.1.14 → v0.1.15
+ * sequence that worked through this.)
+ *
+ * **Why Plus over Flash**: Plus's reasoning + larger model is worth the
+ * 4-5× cost premium when the user's whole point is "look at this and
+ * redesign it" — Flash is cheap but tends to ignore subtle layout cues
+ * the user expects to be picked up. Users who want speed-over-quality
+ * can manually pick `qwen3-vl-flash` from the model picker.
  *
  * **Why not GLM-4 / Zhipu**: GLM-4-Plus does support vision but pricing
  * is higher and the OpenAI-compat surface needs more parameter shimming;
- * VL-Max is cheaper for the typical small-resolution screenshot input.
+ * Qwen3-VL-Plus is cheaper for the typical small-resolution screenshot
+ * input.
  */
-export const DESIGN_VISION_FALLBACK_MODEL = 'qwen-vl-max-latest';
+export const DESIGN_VISION_FALLBACK_MODEL = 'qwen3-vl-plus';
 
 /**
  * Models that come in "base ↔ reasoner" pairs — same family, non-thinking vs

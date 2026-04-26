@@ -89,24 +89,36 @@ const DEEPSEEK: ProviderConfig = {
 //                         output ¥2.0  / 1M  ≈ $0.286 → 286 micros/1k
 //   qwen-coder-plus     : input  ¥3.5  / 1M  ≈ $0.500 → 500 micros/1k (coder tier)
 //                         output ¥7.0  / 1M  ≈ $1.000 → 1000 micros/1k
-//   qwen-vl-max-latest  : input  ¥20   / 1M  ≈ $2.857 → 2857 micros/1k (vision tier)
-//                         output ¥20   / 1M  ≈ $2.857 → 2857 micros/1k
-//                         + image input billed by resolution (DashScope handles
-//                         the conversion upstream — we just see the resulting
-//                         token count and bill at this rate).
+//   qwen3-vl-plus    : input  ¥6   / 1M  ≈ $0.857 → 857 micros/1k (vision tier)
+//                      output ¥18  / 1M  ≈ $2.571 → 2571 micros/1k
+//   qwen3-vl-flash   : input  ¥1.5 / 1M  ≈ $0.214 → 214 micros/1k (vision flash)
+//                      output ¥4.5 / 1M  ≈ $0.643 → 643 micros/1k
+//                      + image input billed by resolution (DashScope handles
+//                      the conversion upstream — we just see the resulting
+//                      token count and bill at this rate).
 //
-// Re-check before production; Alibaba adjusts prices quarterly.
+// VL-* note (2026-04): Alibaba retired the `qwen-vl-max` line and rolled
+// the flagship vision tier into Qwen3-VL-Plus, with thinking-mode added.
+// The previous `qwen-vl-max-latest` ID showed the "即将下线" badge on
+// bailian.console as of 2026-04-26 — register only the Qwen3-VL ids here
+// going forward.
+//
+// Re-check before production; Alibaba adjusts prices quarterly. The
+// VL pricing above is estimated from public CNY rates around the
+// Qwen3-VL launch — verify on bailian.console.aliyun.com → 模型详情 →
+// 计费说明 before relying on it for billing accuracy.
 const QWEN: ProviderConfig = {
   id: 'qwen',
   baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
   keyEnvName: 'QWEN_API_KEY',
   models: {
-    'qwen-turbo':         { inputMicroUsdPer1k:   43, outputMicroUsdPer1k:   86 },
-    'qwen-plus':          { inputMicroUsdPer1k:  114, outputMicroUsdPer1k:  286 },
-    'qwen-max':           { inputMicroUsdPer1k:  343, outputMicroUsdPer1k: 1371 },
-    'qwen-long':          { inputMicroUsdPer1k:   71, outputMicroUsdPer1k:  286 },
-    'qwen-coder-plus':    { inputMicroUsdPer1k:  500, outputMicroUsdPer1k: 1000 },
-    'qwen-vl-max-latest': { inputMicroUsdPer1k: 2857, outputMicroUsdPer1k: 2857 },
+    'qwen-turbo':       { inputMicroUsdPer1k:   43, outputMicroUsdPer1k:   86 },
+    'qwen-plus':        { inputMicroUsdPer1k:  114, outputMicroUsdPer1k:  286 },
+    'qwen-max':         { inputMicroUsdPer1k:  343, outputMicroUsdPer1k: 1371 },
+    'qwen-long':        { inputMicroUsdPer1k:   71, outputMicroUsdPer1k:  286 },
+    'qwen-coder-plus':  { inputMicroUsdPer1k:  500, outputMicroUsdPer1k: 1000 },
+    'qwen3-vl-plus':    { inputMicroUsdPer1k:  857, outputMicroUsdPer1k: 2571 },
+    'qwen3-vl-flash':   { inputMicroUsdPer1k:  214, outputMicroUsdPer1k:  643 },
   },
 };
 
