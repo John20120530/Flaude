@@ -189,6 +189,36 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
       // Skipping parseMessage for design mode keeps message.content raw,
       // which is exactly what designExtract expects.
       const isDesignMode = conversation.mode === 'design';
+
+      // Throttle reasoning-delta patches. DeepSeek V4 Pro thinking-mode
+      // emits a long CoT stream (we've seen 1500-1700 chars per turn);
+      // patching the store on every single token triggers a Zustand
+      // persist write of the entire state to localStorage on each token.
+      // Across 1500 tokens of reasoning + a multi-MB conversation (after
+      // a couple of office_extract calls), that's the difference between
+      // "smooth" and "WebView2 renderer OOM mid-stream". Buffer for ~150ms
+      // between flushes — visually indistinguishable from real-time, but
+      // ~50× fewer state writes. We always flush the latest accumulated
+      // value at the end of the stream regardless.
+      const REASONING_FLUSH_MS = 150;
+      let reasoningPending = false;
+      let reasoningTimer: ReturnType<typeof setTimeout> | null = null;
+      const flushReasoning = () => {
+        if (reasoningTimer) {
+          clearTimeout(reasoningTimer);
+          reasoningTimer = null;
+        }
+        if (reasoningPending) {
+          patchLastMessage(conversation.id, { reasoning });
+          reasoningPending = false;
+        }
+      };
+      const scheduleReasoning = () => {
+        reasoningPending = true;
+        if (reasoningTimer) return;
+        reasoningTimer = setTimeout(flushReasoning, REASONING_FLUSH_MS);
+      };
+
       for await (const chunk of streamChat({
         modelId: effectiveModelId,
         messages: history,
@@ -208,7 +238,7 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
         }
         if (chunk.reasoningDelta) {
           reasoning += chunk.reasoningDelta;
-          patchLastMessage(conversation.id, { reasoning });
+          scheduleReasoning();
         }
         if (chunk.toolCallDelta) {
           const tc = chunk.toolCallDelta;
@@ -247,6 +277,12 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
           break;
         }
       }
+
+      // Stream ended (or errored) — make sure the latest reasoning chunk
+      // makes it to the store. Without this, the user could see "thinking…"
+      // freeze 100-150ms short of the full trace because the throttle
+      // timer never got to fire.
+      flushReasoning();
 
       // Normal termination — nothing more to do.
       if (finishReason !== 'tool_calls' || toolCallsMap.size === 0) return;

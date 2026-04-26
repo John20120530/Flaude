@@ -36,12 +36,22 @@ use std::io::Read;
 use std::path::Path;
 use zip::ZipArchive;
 
-/// Output cap for any single extraction. 512 KB is double `fs_read_file`'s
-/// 256 KB default — Office content is typically denser per byte than
-/// source code so the model gets more value per token, and we want to fit
-/// a "complete enough" view of typical investment-research / contract /
-/// paper documents in one read.
-const MAX_EXTRACT_BYTES: usize = 512 * 1024;
+/// Output cap for any single extraction.
+///
+/// Originally 512 KB (double fs_read_file's 256 KB default) on the theory
+/// that office content is denser per byte. In practice we ran a real
+/// investment-research task with three Office files, hit ~1.5 MB of tool
+/// result text in conversation state, watched Zustand persist serialize
+/// + write that to localStorage on every reasoning-delta tick (~1500x
+/// per turn), and OOM'd the WebView2 renderer mid-stream.
+///
+/// 128 KB is the empirical sweet spot: typical PDF/docx extractions
+/// surface their key content (intro + key sections) in the first
+/// 50-100 KB, and the truncation hint tells the model to ask for a
+/// specific section if it needs more. Keeps single-conversation tool
+/// content well under 1 MB across 3-5 file reads, which the renderer
+/// + localStorage stack handles comfortably.
+const MAX_EXTRACT_BYTES: usize = 128 * 1024;
 
 /// Extensions this module knows how to handle. Centralised so `fs_read_file`
 /// in lib.rs uses the same list — keeps the route-table single-sourced.
