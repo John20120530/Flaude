@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import {
   Save,
@@ -25,6 +25,7 @@ import {
   Database,
   Eye,
   EyeOff,
+  Upload,
 } from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
 import { cn } from '@/lib/utils';
@@ -49,6 +50,13 @@ import {
   countBundleContents,
   exportAccountBundle,
 } from '@/lib/accountExport';
+import {
+  applyImportBundle,
+  describeImportError,
+  parseImportBundle,
+  previewImportBundle,
+  type ImportPreview,
+} from '@/lib/accountImport';
 
 export default function SettingsView() {
   const providers = useAppStore((s) => s.providers);
@@ -444,6 +452,14 @@ function DataSection() {
   const [busy, setBusy] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // Import state — separate from export state so the two flows don't fight
+  // over the same `busy` flag, and so an import error doesn't blank out a
+  // recent "exported successfully" indicator.
+  const [importErr, setImportErr] = useState<string | null>(null);
+  const [importedAt, setImportedAt] = useState<number | null>(null);
+  const [preview, setPreview] = useState<ImportPreview | null>(null);
+  const [importSettingsOpt, setImportSettingsOpt] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Reading the store on every render is cheap — Zustand hooks short-circuit
   // when the selected slice didn't change. We select the specific counters
@@ -479,6 +495,46 @@ function DataSection() {
     }
   };
 
+  const onPickImportFile = () => {
+    setImportErr(null);
+    fileInputRef.current?.click();
+  };
+
+  const onImportFile = async (file: File) => {
+    setImportErr(null);
+    setImportedAt(null);
+    let raw: string;
+    try {
+      raw = await file.text();
+    } catch (e) {
+      setImportErr(`读取文件失败：${(e as Error).message}`);
+      return;
+    }
+    const parsed = parseImportBundle(raw);
+    if (!parsed.ok) {
+      setImportErr(describeImportError(parsed.error));
+      return;
+    }
+    setPreview(previewImportBundle(parsed.bundle));
+    setImportSettingsOpt(false);
+  };
+
+  const onApplyImport = () => {
+    if (!preview) return;
+    try {
+      applyImportBundle(preview.bundle, { importSettings: importSettingsOpt });
+      setImportedAt(Date.now());
+      setPreview(null);
+    } catch (e) {
+      setImportErr(`导入失败：${(e as Error).message}`);
+    }
+  };
+
+  const onCancelImport = () => {
+    setPreview(null);
+    setImportSettingsOpt(false);
+  };
+
   return (
     <section>
       <h2 className="text-lg font-semibold mb-1 flex items-center gap-2">
@@ -501,7 +557,7 @@ function DataSection() {
           <Stat label="MCP 服务器" value={counts.mcpServers} />
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <button
             onClick={onExport}
             disabled={busy}
@@ -514,10 +570,36 @@ function DataSection() {
             )}
             导出全部数据
           </button>
+          <button
+            onClick={onPickImportFile}
+            disabled={busy}
+            className="inline-flex items-center gap-2 text-sm px-3 py-1.5 rounded-md border border-claude-border dark:border-night-border hover:bg-black/[0.04] dark:hover:bg-white/[0.04] disabled:opacity-50"
+          >
+            <Upload className="w-4 h-4" />
+            从备份导入
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,application/json"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void onImportFile(f);
+              // Reset so picking the same file twice fires onChange.
+              e.target.value = '';
+            }}
+          />
           {lastSavedAt !== null && !busy && !err && (
             <span className="text-xs text-green-700 dark:text-green-400 flex items-center gap-1">
               <CheckCircle2 className="w-3.5 h-3.5" />
               已保存
+            </span>
+          )}
+          {importedAt !== null && (
+            <span className="text-xs text-green-700 dark:text-green-400 flex items-center gap-1">
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              已导入
             </span>
           )}
           {err && (
@@ -526,9 +608,193 @@ function DataSection() {
               {err}
             </span>
           )}
+          {importErr && (
+            <span className="text-xs text-red-600 dark:text-red-400 flex items-center gap-1">
+              <AlertCircle className="w-3.5 h-3.5" />
+              {importErr}
+            </span>
+          )}
         </div>
       </div>
+
+      {preview && (
+        <ImportPreviewModal
+          preview={preview}
+          importSettings={importSettingsOpt}
+          onToggleSettings={() => setImportSettingsOpt((v) => !v)}
+          onApply={onApplyImport}
+          onCancel={onCancelImport}
+        />
+      )}
     </section>
+  );
+}
+
+/**
+ * Modal that summarizes what an import will do before the user commits.
+ * Mirrors the WriteApprovalModal / PlanApprovalModal pattern: covers the
+ * page until the user makes a choice, no auto-focus on the primary action
+ * so they read the counts first. The cross-account warning gets a top
+ * banner because it's the most likely "user is about to make a mistake"
+ * scenario.
+ */
+function ImportPreviewModal({
+  preview,
+  importSettings,
+  onToggleSettings,
+  onApply,
+  onCancel,
+}: {
+  preview: ImportPreview;
+  importSettings: boolean;
+  onToggleSettings: () => void;
+  onApply: () => void;
+  onCancel: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onCancel();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onCancel]);
+
+  const exportedDate = new Date(preview.exportedAt).toLocaleString();
+  const totalAffected =
+    preview.conversations.added +
+    preview.conversations.updated +
+    preview.conversations.tombstoned +
+    preview.projects.added +
+    preview.projects.updated +
+    preview.projects.tombstoned +
+    preview.artifacts.added +
+    preview.artifacts.updated +
+    preview.artifacts.tombstoned +
+    preview.skills.added +
+    preview.skills.updated +
+    preview.slashCommands.added;
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="导入备份预览"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+    >
+      <div
+        className={cn(
+          'w-full max-w-2xl max-h-[90vh] flex flex-col',
+          'rounded-xl border border-claude-border dark:border-night-border',
+          'bg-claude-bg dark:bg-night-bg shadow-2xl',
+        )}
+      >
+        <div className="px-5 py-3 border-b border-claude-border dark:border-night-border">
+          <h2 className="font-semibold flex items-center gap-2">
+            <Upload className="w-4 h-4" />
+            导入备份预览
+          </h2>
+          <div className="text-xs text-claude-muted dark:text-night-muted mt-0.5">
+            导出于 {exportedDate}
+            {preview.exportedBy && ` · 来自 ${preview.exportedBy.email}`}
+            {preview.flaudeVersion && ` · Flaude ${preview.flaudeVersion}`}
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-auto px-5 py-4 space-y-3 text-sm">
+          {preview.isOtherAccount && preview.exportedBy && (
+            <div className="p-3 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 text-amber-900 dark:text-amber-200 text-xs">
+              ⚠ 这个备份是从 <code className="font-mono">{preview.exportedBy.email}</code> 导出的，
+              和当前登录账号不一致。导入会让两个账号的数据混在一起，且会通过 sync 同步到当前账号的服务端。
+              确定要继续吗？
+            </div>
+          )}
+
+          <div className="p-3 rounded-md bg-black/[0.03] dark:bg-white/[0.03] text-xs text-claude-muted dark:text-night-muted">
+            合并策略：每条记录按 <code>updatedAt</code> 取较新版本（LWW）。本地比备份更新的，**保留本地**。
+            备份里删除标记的会同步删除（如本地存在）。设置项默认不导入。
+          </div>
+
+          <ImportEntityRow label="会话" counts={preview.conversations} />
+          <ImportEntityRow label="项目" counts={preview.projects} />
+          <ImportEntityRow label="工件" counts={preview.artifacts} />
+          <div className="flex items-center gap-3 text-xs">
+            <span className="w-12 text-claude-muted dark:text-night-muted">技能</span>
+            <span className="text-green-700 dark:text-green-400">+{preview.skills.added} 新增</span>
+            <span className="text-blue-700 dark:text-blue-400">{preview.skills.updated} 更新</span>
+            <span className="text-claude-muted dark:text-night-muted">{preview.skills.localKept} 保留本地</span>
+          </div>
+          <div className="flex items-center gap-3 text-xs">
+            <span className="w-12 text-claude-muted dark:text-night-muted">斜杠</span>
+            <span className="text-green-700 dark:text-green-400">+{preview.slashCommands.added} 新增</span>
+            <span className="text-claude-muted dark:text-night-muted">{preview.slashCommands.skipped} 已存在跳过</span>
+          </div>
+
+          <label className="flex items-center gap-2 mt-3 text-xs cursor-pointer">
+            <input
+              type="checkbox"
+              checked={importSettings}
+              onChange={onToggleSettings}
+              className="rounded"
+            />
+            <span>同时导入设置（主题、默认模型、全局记忆、MCP 服务器、斜杠命令、禁用工具列表）。<strong>不会</strong>导入工作区路径和文件/shell 权限——这些是按设备配置的。</span>
+          </label>
+
+          {totalAffected === 0 && (
+            <div className="p-3 rounded-md bg-black/[0.03] dark:bg-white/[0.03] text-xs">
+              这个备份的数据全部在本地存在且本地版本不旧——导入不会有任何变化。
+            </div>
+          )}
+        </div>
+
+        <div className="px-5 py-3 border-t border-claude-border dark:border-night-border bg-black/[0.02] dark:bg-white/[0.02] flex items-center gap-3">
+          <span className="text-[11px] text-claude-muted dark:text-night-muted">Esc 取消</span>
+          <div className="flex-1" />
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-3 py-1.5 rounded-md text-sm hover:bg-black/[0.06] dark:hover:bg-white/[0.06]"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={onApply}
+            className={cn(
+              'px-3 py-1.5 rounded-md text-sm font-medium inline-flex items-center gap-1.5',
+              preview.isOtherAccount
+                ? 'bg-amber-600 text-white hover:bg-amber-600/90'
+                : 'bg-claude-accent text-white hover:bg-claude-accent/90',
+            )}
+          >
+            <Upload className="w-4 h-4" />
+            {preview.isOtherAccount ? '我确认，仍然导入' : '应用导入'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ImportEntityRow({
+  label,
+  counts,
+}: {
+  label: string;
+  counts: ImportPreview['conversations'];
+}) {
+  return (
+    <div className="flex items-center gap-3 text-xs">
+      <span className="w-12 text-claude-muted dark:text-night-muted">{label}</span>
+      <span className="text-green-700 dark:text-green-400">+{counts.added} 新增</span>
+      <span className="text-blue-700 dark:text-blue-400">{counts.updated} 更新</span>
+      <span className="text-claude-muted dark:text-night-muted">{counts.localKept} 保留本地</span>
+      {counts.tombstoned > 0 && (
+        <span className="text-red-700 dark:text-red-400">{counts.tombstoned} 删除</span>
+      )}
+    </div>
   );
 }
 
