@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware';
 import type {
   Attachment,
   Conversation,
+  Hook,
   MCPServer,
   Message,
   Project,
@@ -145,6 +146,9 @@ interface AppState {
   /** Tool names the user has explicitly disabled. Applied to the registry on
    *  rehydrate and whenever MCP tools auto-register. */
   disabledToolNames: string[];
+
+  /** User-configured automation hooks (Code mode only — desktop only). */
+  hooks: Hook[];
 
   // Desktop / workspace (only meaningful under Tauri)
   /** Absolute path of the folder the user picked. `null` in the browser. */
@@ -340,6 +344,11 @@ interface AppState {
   // Tools
   setToolDisabled: (name: string, disabled: boolean) => void;
 
+  // Hooks
+  addHook: (h: Omit<Hook, 'id' | 'createdAt' | 'updatedAt'>) => string;
+  updateHook: (id: string, patch: Partial<Hook>) => void;
+  deleteHook: (id: string) => void;
+
   // Desktop / workspace
   setWorkspacePath: (path: string | null) => void;
   setAllowFileWrites: (v: boolean) => void;
@@ -452,6 +461,7 @@ export const useAppStore = create<AppState>()(
       activeArtifactId: null,
 
       mcpServers: [],
+      hooks: [],
       slashCommands: [...BUILTIN_SLASH_COMMANDS],
       disabledToolNames: [],
 
@@ -1037,6 +1047,27 @@ export const useAppStore = create<AppState>()(
         });
       },
 
+      // Hooks
+      addHook: (h) => {
+        const id = uid('hook');
+        const now = Date.now();
+        set((s) => ({
+          hooks: [
+            ...s.hooks,
+            { ...h, id, createdAt: now, updatedAt: now },
+          ],
+        }));
+        return id;
+      },
+      updateHook: (id, patch) =>
+        set((s) => ({
+          hooks: s.hooks.map((h) =>
+            h.id === id ? { ...h, ...patch, updatedAt: Date.now() } : h,
+          ),
+        })),
+      deleteHook: (id) =>
+        set((s) => ({ hooks: s.hooks.filter((h) => h.id !== id) })),
+
       // Desktop
       setWorkspacePath: (path) => set({ workspacePath: path }),
       setAllowFileWrites: (v) => set({ allowFileWrites: v }),
@@ -1155,6 +1186,7 @@ export const useAppStore = create<AppState>()(
           skills: [...BUILTIN_SKILLS],
           slashCommands: [...BUILTIN_SLASH_COMMANDS],
           mcpServers: [],
+          hooks: [],
           disabledToolNames: [],
           globalMemory: '',
           conversationTodos: {},
@@ -1619,6 +1651,7 @@ export const useAppStore = create<AppState>()(
         artifacts: s.artifacts,
         // MCP + slash + tools
         mcpServers: s.mcpServers,
+        hooks: s.hooks,
         slashCommands: s.slashCommands,
         disabledToolNames: s.disabledToolNames,
         // Desktop
@@ -1719,6 +1752,9 @@ export const useAppStore = create<AppState>()(
             state.slashCommands.push({ ...b });
           }
         }
+        // Defensive: pre-v0.1.28 persisted state has no `hooks` array, which
+        // would crash any selector that calls `.filter()` / `.map()` on it.
+        if (!Array.isArray(state.hooks)) state.hooks = [];
         // Re-seed the provider catalog from DEFAULT_PROVIDERS on every rehydrate.
         // The catalog (ids, displayName, baseUrl, models[], descriptions,
         // capabilities, context windows) is code-owned single source of truth;
