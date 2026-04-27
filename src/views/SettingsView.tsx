@@ -153,7 +153,7 @@ export default function SettingsView() {
                   不同模式的默认模型。模型列表由服务端提供——本机选不到的型号说明服务端没开。
                 </p>
                 <div className="space-y-2">
-                  {(['chat', 'code'] as const).map((mode) => (
+                  {(['chat', 'code', 'design'] as const).map((mode) => (
                     <div
                       key={mode}
                       className="flex items-center gap-3 p-3 rounded-lg border border-claude-border dark:border-night-border"
