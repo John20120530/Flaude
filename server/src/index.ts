@@ -34,6 +34,7 @@ import {
 } from './auth';
 import chat from './chat';
 import type { AppContext, Env } from './env';
+import mcpDemo from './mcpDemo';
 import { requireAuth } from './middleware';
 import sync from './sync';
 import tools from './tools';
@@ -233,6 +234,21 @@ app.get('/auth/me', requireAuth, async (c) => {
   }
   return c.json({ user: row });
 });
+
+// -----------------------------------------------------------------------------
+// MCP demo endpoint (./mcpDemo.ts). Public — no auth.
+//
+// IMPORTANT: must be mounted BEFORE the auth-gated sub-apps. Hono evaluates
+// route registrations in order, and `chat.use('*', requireAuth)` would
+// short-circuit any request that walks into the chat sub-app — even ones
+// that *would* match a later sub-app's route, because the auth middleware
+// runs before the (failed) sub-app route lookup falls through. By
+// registering this open route first, /mcp/echo is matched + handled before
+// the chat sub-app gets a chance to 401 it.
+//
+//   POST /mcp/echo   — minimal MCP HTTP server with one `echo` tool.
+// -----------------------------------------------------------------------------
+app.route('/', mcpDemo);
 
 // -----------------------------------------------------------------------------
 // Chat proxy + /usage (mounted from ./chat.ts — requireAuth is applied inside
