@@ -75,78 +75,155 @@ import {
   type TrustTier,
 } from '@/lib/mcpsSearch';
 
+type SettingsTab = 'general' | 'data' | 'skills' | 'mcp' | 'tools';
+
+const TAB_DEFINITIONS: Array<{
+  id: SettingsTab;
+  label: string;
+  hint: string;
+}> = [
+  { id: 'general', label: 'General', hint: '账户、默认模型、桌面' },
+  { id: 'data', label: '数据', hint: '全局记忆、数据管理' },
+  { id: 'skills', label: 'Skills', hint: 'Skills、Skills 市场、斜杠命令' },
+  { id: 'mcp', label: 'MCP', hint: 'MCP 服务器、MCP 市场' },
+  { id: 'tools', label: '工具', hint: 'Hooks、工具开关' },
+];
+
 export default function SettingsView() {
   const providers = useAppStore((s) => s.providers);
   const modelByMode = useAppStore((s) => s.modelByMode);
   const setModelForMode = useAppStore((s) => s.setModelForMode);
 
+  // Tab state. Lifted-but-not-persisted: re-mounting Settings (e.g. by
+  // route navigation) resets to General. That's a reasonable default —
+  // users come into Settings looking for a specific thing and the
+  // hint-row immediately tells them which tab to click.
+  const [activeTab, setActiveTab] = useState<SettingsTab>('general');
+
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="max-w-3xl mx-auto px-6 py-8 space-y-10">
+      <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
         <div>
           <h1 className="text-2xl font-semibold">设置</h1>
           <p className="text-sm text-claude-muted dark:text-night-muted mt-1">
-            账户、默认模型、工具和斜杠命令。模型 API Key 由服务端集中保管。
+            账户、模型、Skills、MCP、工具。模型 API Key 由服务端集中保管。
           </p>
         </div>
 
-        <AccountSection />
-
-        {/* Mode defaults */}
-        <section>
-          <h2 className="text-lg font-semibold mb-3">默认模型</h2>
-          <p className="text-xs text-claude-muted dark:text-night-muted mb-3">
-            不同模式的默认模型。模型列表由服务端提供——本机选不到的型号说明服务端没开。
-          </p>
-          <div className="space-y-2">
-            {(['chat', 'code'] as const).map((mode) => (
-              <div
-                key={mode}
-                className="flex items-center gap-3 p-3 rounded-lg border border-claude-border dark:border-night-border"
+        {/* Tab bar.
+            Sticky-top so the tabs stay visible as the user scrolls long
+            sub-pages (Skills section can have many entries). The
+            sticky offset is `top-0` because Settings has no app-level
+            header within this scroll container. */}
+        <div className="sticky top-0 z-10 -mx-6 px-6 pb-3 bg-white dark:bg-night-bg border-b border-claude-border dark:border-night-border">
+          <nav className="flex gap-1 -mb-px overflow-x-auto" aria-label="设置分类">
+            {TAB_DEFINITIONS.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveTab(tab.id)}
+                aria-current={activeTab === tab.id ? 'page' : undefined}
+                title={tab.hint}
+                className={cn(
+                  'px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors whitespace-nowrap',
+                  activeTab === tab.id
+                    ? 'border-claude-accent text-claude-ink dark:text-night-ink'
+                    : 'border-transparent text-claude-muted dark:text-night-muted hover:text-claude-ink dark:hover:text-night-ink',
+                )}
               >
-                <div className="w-20 text-sm capitalize">{mode}</div>
-                <select
-                  value={modelByMode[mode]}
-                  onChange={(e) => setModelForMode(mode, e.target.value)}
-                  className="flex-1 bg-transparent border border-claude-border dark:border-night-border rounded-md px-2 py-1.5 text-sm"
-                >
-                  {providers
-                    .filter((p) => p.enabled)
-                    .map((p) => (
-                      <optgroup key={p.id} label={p.displayName}>
-                        {p.models.map((m) => (
-                          <option key={m.id} value={m.id}>
-                            {m.displayName}
-                          </option>
-                        ))}
-                      </optgroup>
-                    ))}
-                </select>
-              </div>
+                {tab.label}
+              </button>
             ))}
-          </div>
-        </section>
+          </nav>
+        </div>
 
-        <DesktopSection />
-        <MemorySection />
-        <DataSection />
-        <SkillsSection />
-        <SkillsMarketSection />
-        <MCPSection />
-        <McpMarketSection />
-        <SlashSection />
-        <HooksSection />
-        <ToolsSection />
+        {/* Tab content. Each branch renders the same set of <section>s
+            it always did, just gated by activeTab. About lives at the
+            bottom of General — it's metadata, not a feature, and it'd
+            be lonely as its own tab. */}
+        <div className="space-y-10 pt-2">
+          {activeTab === 'general' && (
+            <>
+              <AccountSection />
 
-        <section>
-          <h2 className="text-lg font-semibold mb-3">关于</h2>
-          <div className="text-sm text-claude-muted dark:text-night-muted space-y-1">
-            <div>Flaude v0.1 — 基于中国开源模型的 Claude-like 客户端</div>
-            <div>
-              此应用通过标准 OpenAI 兼容 API 接入各模型厂商，所有对话与密钥仅保存在本机。
-            </div>
-          </div>
-        </section>
+              {/* Mode defaults */}
+              <section>
+                <h2 className="text-lg font-semibold mb-3">默认模型</h2>
+                <p className="text-xs text-claude-muted dark:text-night-muted mb-3">
+                  不同模式的默认模型。模型列表由服务端提供——本机选不到的型号说明服务端没开。
+                </p>
+                <div className="space-y-2">
+                  {(['chat', 'code'] as const).map((mode) => (
+                    <div
+                      key={mode}
+                      className="flex items-center gap-3 p-3 rounded-lg border border-claude-border dark:border-night-border"
+                    >
+                      <div className="w-20 text-sm capitalize">{mode}</div>
+                      <select
+                        value={modelByMode[mode]}
+                        onChange={(e) => setModelForMode(mode, e.target.value)}
+                        className="flex-1 bg-transparent border border-claude-border dark:border-night-border rounded-md px-2 py-1.5 text-sm"
+                      >
+                        {providers
+                          .filter((p) => p.enabled)
+                          .map((p) => (
+                            <optgroup key={p.id} label={p.displayName}>
+                              {p.models.map((m) => (
+                                <option key={m.id} value={m.id}>
+                                  {m.displayName}
+                                </option>
+                              ))}
+                            </optgroup>
+                          ))}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              <DesktopSection />
+
+              <section>
+                <h2 className="text-lg font-semibold mb-3">关于</h2>
+                <div className="text-sm text-claude-muted dark:text-night-muted space-y-1">
+                  <div>Flaude — 基于全球顶级模型的 Claude-like 客户端</div>
+                  <div>
+                    此应用通过标准 OpenAI 兼容 API 接入各模型厂商，所有对话与密钥仅保存在本机。
+                  </div>
+                </div>
+              </section>
+            </>
+          )}
+
+          {activeTab === 'data' && (
+            <>
+              <MemorySection />
+              <DataSection />
+            </>
+          )}
+
+          {activeTab === 'skills' && (
+            <>
+              <SkillsSection />
+              <SkillsMarketSection />
+              <SlashSection />
+            </>
+          )}
+
+          {activeTab === 'mcp' && (
+            <>
+              <MCPSection />
+              <McpMarketSection />
+            </>
+          )}
+
+          {activeTab === 'tools' && (
+            <>
+              <HooksSection />
+              <ToolsSection />
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -1115,7 +1192,7 @@ function SkillsSection() {
       <div className="flex items-center justify-between mb-1">
         <h2 className="text-lg font-semibold flex items-center gap-2">
           <Sparkles className="w-4 h-4" />
-          技能
+          Skills
           <span className="text-xs font-normal text-claude-muted dark:text-night-muted">
             · {skills.filter((s) => s.enabled).length}/{skills.length} 启用
           </span>
@@ -2253,27 +2330,26 @@ function SkillsMarketSection() {
     [skills],
   );
 
-  // Search state. Empty `query` shows the curated baseline; non-empty
-  // triggers a federated GitHub search via the Worker. We debounce the
-  // network call by 350ms — feels responsive while typing without
-  // hammering the upstream during a long word.
+  // Search state — split into `query` (the current input field value)
+  // and `submitted` (the keyword we're actually searching for). The
+  // network call only fires when the user explicitly hits Enter or
+  // clicks the search button — never on each keystroke. This is a
+  // deliberate UX choice: federated search hits 4 upstream registries,
+  // and a debounced typing flow burns cache for half-formed queries
+  // ("ja", "jav", "java") that the user wasn't going to keep anyway.
+  // Explicit submit also makes the cache hit pattern more predictable.
   const [query, setQuery] = useState('');
-  const [debounced, setDebounced] = useState('');
+  const [submitted, setSubmitted] = useState('');
   const [results, setResults] = useState<SkillsMarketEntry[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fromCache, setFromCache] = useState(false);
   // Track the latest in-flight query so a slow earlier response doesn't
-  // overwrite a fresher one (race when user types fast).
+  // overwrite a fresher one (race when user submits twice quickly).
   const inflightRef = useRef(0);
 
   useEffect(() => {
-    const t = setTimeout(() => setDebounced(query.trim()), 350);
-    return () => clearTimeout(t);
-  }, [query]);
-
-  useEffect(() => {
-    if (!debounced) {
+    if (!submitted) {
       setResults(null);
       setLoading(false);
       setError(null);
@@ -2282,7 +2358,7 @@ function SkillsMarketSection() {
     const ticket = ++inflightRef.current;
     setLoading(true);
     setError(null);
-    void searchSkillsMarket(debounced)
+    void searchSkillsMarket(submitted)
       .then((res) => {
         if (inflightRef.current !== ticket) return; // a newer query won
         setResults(res.results);
@@ -2295,28 +2371,38 @@ function SkillsMarketSection() {
         setResults(null);
         setLoading(false);
       });
-  }, [debounced]);
+  }, [submitted]);
+
+  const handleSubmit = (e?: React.FormEvent) => {
+    e?.preventDefault();
+    setSubmitted(query.trim());
+  };
+
+  const handleClear = () => {
+    setQuery('');
+    setSubmitted('');
+  };
 
   // Decide what to render:
-  //   - empty query   → curated baseline (8 entries from SKILLS_MARKET)
-  //   - active search → results (or loading / error / empty states)
+  //   - empty submitted   → curated baseline (8 entries from SKILLS_MARKET)
+  //   - active search     → results (or loading / error / empty states)
   //
   // When showing search results, we union them with curated entries that
   // also match the query (substring on title/description) — those float
   // to the top with a "推荐" badge. Why: a user searching "java" should
   // see the curated "Java Clean Code" on top even though it'd also be
   // found via GitHub.
-  const showingSearch = debounced.length > 0;
+  const showingSearch = submitted.length > 0;
   const matchedCurated = useMemo(() => {
     if (!showingSearch) return [];
-    const q = debounced.toLowerCase();
+    const q = submitted.toLowerCase();
     return SKILLS_MARKET.filter(
       (e) =>
         e.title.toLowerCase().includes(q) ||
         e.description.toLowerCase().includes(q) ||
         (e.tags ?? []).some((t) => t.toLowerCase().includes(q)),
     );
-  }, [showingSearch, debounced]);
+  }, [showingSearch, submitted]);
 
   const dedupedResults = useMemo(() => {
     if (!showingSearch || !results) return [];
@@ -2336,27 +2422,38 @@ function SkillsMarketSection() {
         每条都标注来源 / license / publisher。
       </p>
 
-      {/* Search box */}
-      <div className="relative mb-3">
-        <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-claude-muted dark:text-night-muted pointer-events-none" />
-        <input
-          type="search"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="搜索关键词，如 'java' / 'pdf' / 'review' / 'memory'…"
-          className="w-full pl-8 pr-8 py-2 text-sm rounded-md border border-claude-border dark:border-night-border bg-white dark:bg-night-bg focus:outline-none focus:border-claude-accent"
-        />
-        {query && (
-          <button
-            type="button"
-            onClick={() => setQuery('')}
-            className="absolute right-2 top-1/2 -translate-y-1/2 text-claude-muted hover:text-claude-ink dark:hover:text-night-ink"
-            aria-label="清除"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        )}
-      </div>
+      {/* Search box — explicit submit (Enter or button), no auto-search-on-typing */}
+      <form onSubmit={handleSubmit} className="flex gap-2 mb-3">
+        <div className="relative flex-1">
+          <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-claude-muted dark:text-night-muted pointer-events-none" />
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="搜索关键词，如 'java' / 'pdf' / 'review' / 'memory'… 回车搜索"
+            className="w-full pl-8 pr-8 py-2 text-sm rounded-md border border-claude-border dark:border-night-border bg-white dark:bg-night-bg focus:outline-none focus:border-claude-accent"
+          />
+          {(query || submitted) && (
+            <button
+              type="button"
+              onClick={handleClear}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-claude-muted hover:text-claude-ink dark:hover:text-night-ink"
+              aria-label="清除"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+        <button
+          type="submit"
+          disabled={!query.trim() || loading}
+          className="btn-primary text-sm disabled:opacity-50 px-3"
+          title="搜索（也可按回车）"
+        >
+          {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+          搜索
+        </button>
+      </form>
 
       {/* Status line */}
       {showingSearch && (
@@ -2364,7 +2461,7 @@ function SkillsMarketSection() {
           {loading && (
             <>
               <Loader2 className="w-3 h-3 animate-spin" />
-              在 GitHub 上搜「{debounced}」…
+              在 GitHub 上搜「{submitted}」…
             </>
           )}
           {!loading && error && (
@@ -2691,12 +2788,12 @@ function McpMarketSection() {
   );
 
   // Federated search state — mirrors SkillsMarketSection's design:
-  // 350ms debounce + race-safe inflight ref + curated baseline as
-  // empty-state. Empty query shows the static MCP_MARKET; typed query
+  // explicit submit (Enter / button), no debounce. Empty `submitted`
+  // shows the static MCP_MARKET baseline; typed-and-submitted query
   // hits the Worker which federates 5 sources (PulseMCP / Glama / npm /
   // GitHub + direct probe of @modelcontextprotocol/* packages).
   const [query, setQuery] = useState('');
-  const [debounced, setDebounced] = useState('');
+  const [submitted, setSubmitted] = useState('');
   const [searchResults, setSearchResults] = useState<McpSearchResult[] | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -2704,12 +2801,7 @@ function McpMarketSection() {
   const inflightRef = useRef(0);
 
   useEffect(() => {
-    const t = setTimeout(() => setDebounced(query.trim()), 350);
-    return () => clearTimeout(t);
-  }, [query]);
-
-  useEffect(() => {
-    if (!debounced) {
+    if (!submitted) {
       setSearchResults(null);
       setSearchLoading(false);
       setSearchError(null);
@@ -2718,7 +2810,7 @@ function McpMarketSection() {
     const ticket = ++inflightRef.current;
     setSearchLoading(true);
     setSearchError(null);
-    void searchMcpsMarket(debounced)
+    void searchMcpsMarket(submitted)
       .then((res) => {
         if (inflightRef.current !== ticket) return;
         setSearchResults(res.results);
@@ -2731,9 +2823,19 @@ function McpMarketSection() {
         setSearchResults(null);
         setSearchLoading(false);
       });
-  }, [debounced]);
+  }, [submitted]);
 
-  const showingSearch = debounced.length > 0;
+  const handleSubmitMcp = (e?: React.FormEvent) => {
+    e?.preventDefault();
+    setSubmitted(query.trim());
+  };
+
+  const handleClearMcp = () => {
+    setQuery('');
+    setSubmitted('');
+  };
+
+  const showingSearch = submitted.length > 0;
 
   // Install handler shared between curated rows and search rows. Lifted
   // to the section so both child components call the same store path.
@@ -2817,27 +2919,38 @@ function McpMarketSection() {
         )}
       </p>
 
-      {/* Search box */}
-      <div className="relative mb-3">
-        <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-claude-muted dark:text-night-muted pointer-events-none" />
-        <input
-          type="search"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="搜索 MCP server，如 'memory' / 'filesystem' / 'slack' / 'postgres'…"
-          className="w-full pl-8 pr-8 py-2 text-sm rounded-md border border-claude-border dark:border-night-border bg-white dark:bg-night-bg focus:outline-none focus:border-claude-accent"
-        />
-        {query && (
-          <button
-            type="button"
-            onClick={() => setQuery('')}
-            className="absolute right-2 top-1/2 -translate-y-1/2 text-claude-muted hover:text-claude-ink dark:hover:text-night-ink"
-            aria-label="清除"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        )}
-      </div>
+      {/* Search box — explicit submit (Enter or button) */}
+      <form onSubmit={handleSubmitMcp} className="flex gap-2 mb-3">
+        <div className="relative flex-1">
+          <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-claude-muted dark:text-night-muted pointer-events-none" />
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="搜索 MCP server，如 'memory' / 'filesystem' / 'slack' / 'postgres'… 回车搜索"
+            className="w-full pl-8 pr-8 py-2 text-sm rounded-md border border-claude-border dark:border-night-border bg-white dark:bg-night-bg focus:outline-none focus:border-claude-accent"
+          />
+          {(query || submitted) && (
+            <button
+              type="button"
+              onClick={handleClearMcp}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-claude-muted hover:text-claude-ink dark:hover:text-night-ink"
+              aria-label="清除"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+        <button
+          type="submit"
+          disabled={!query.trim() || searchLoading}
+          className="btn-primary text-sm disabled:opacity-50 px-3"
+          title="搜索（也可按回车）"
+        >
+          {searchLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+          搜索
+        </button>
+      </form>
 
       {/* Status line for active search */}
       {showingSearch && (
@@ -2845,7 +2958,7 @@ function McpMarketSection() {
           {searchLoading && (
             <>
               <Loader2 className="w-3 h-3 animate-spin" />
-              在 4 个 MCP 平台 + 官方包列表上搜「{debounced}」…
+              在 4 个 MCP 平台 + 官方包列表上搜「{submitted}」…
             </>
           )}
           {!searchLoading && searchError && (

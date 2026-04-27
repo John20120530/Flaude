@@ -201,7 +201,7 @@ export default function MessageList({
         </div>
         <h2 className="text-xl font-semibold mb-2">你今天想做点什么？</h2>
         <p className="text-sm text-claude-muted dark:text-night-muted max-w-md">
-          Flaude 基于中国开源模型（DeepSeek / Qwen / GLM / Kimi），帮你对话、协作、写代码。
+          Flaude 基于全球顶级模型，帮你对话、设计、写代码。
         </p>
       </div>
     );
