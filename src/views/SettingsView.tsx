@@ -69,6 +69,11 @@ import {
 import { MCP_MARKET, type McpMarketEntry } from '@/config/mcpMarket';
 import { parseSkillMd } from '@/lib/skillsImport';
 import { searchSkillsMarket } from '@/lib/skillsSearch';
+import {
+  searchMcpsMarket,
+  type McpSearchResult,
+  type TrustTier,
+} from '@/lib/mcpsSearch';
 
 export default function SettingsView() {
   const providers = useAppStore((s) => s.providers);
@@ -2685,6 +2690,116 @@ function McpMarketSection() {
     [mcpServers],
   );
 
+  // Federated search state — mirrors SkillsMarketSection's design:
+  // 350ms debounce + race-safe inflight ref + curated baseline as
+  // empty-state. Empty query shows the static MCP_MARKET; typed query
+  // hits the Worker which federates 5 sources (PulseMCP / Glama / npm /
+  // GitHub + direct probe of @modelcontextprotocol/* packages).
+  const [query, setQuery] = useState('');
+  const [debounced, setDebounced] = useState('');
+  const [searchResults, setSearchResults] = useState<McpSearchResult[] | null>(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [fromCache, setFromCache] = useState(false);
+  const inflightRef = useRef(0);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(query.trim()), 350);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  useEffect(() => {
+    if (!debounced) {
+      setSearchResults(null);
+      setSearchLoading(false);
+      setSearchError(null);
+      return;
+    }
+    const ticket = ++inflightRef.current;
+    setSearchLoading(true);
+    setSearchError(null);
+    void searchMcpsMarket(debounced)
+      .then((res) => {
+        if (inflightRef.current !== ticket) return;
+        setSearchResults(res.results);
+        setFromCache(res.fromCache);
+        setSearchLoading(false);
+      })
+      .catch((e: Error) => {
+        if (inflightRef.current !== ticket) return;
+        setSearchError(e.message || '搜索失败');
+        setSearchResults(null);
+        setSearchLoading(false);
+      });
+  }, [debounced]);
+
+  const showingSearch = debounced.length > 0;
+
+  // Install handler shared between curated rows and search rows. Lifted
+  // to the section so both child components call the same store path.
+  const handleInstall = async (
+    spec:
+      | { kind: 'http'; title: string; url: string; token?: string }
+      | {
+          kind: 'stdio-tauri';
+          title: string;
+          command: string;
+          args: string[];
+          envKey?: string;
+          envValue?: string;
+        }
+      | { kind: 'unsupported'; reason: string },
+  ) => {
+    if (spec.kind === 'unsupported') {
+      alert(spec.reason);
+      return;
+    }
+    if (spec.kind === 'http') {
+      addMCPServer({
+        name: spec.title,
+        transport: 'http',
+        url: spec.url,
+        token: spec.token || undefined,
+        enabled: true,
+      });
+      return;
+    }
+    // stdio-tauri
+    const env: Record<string, string> = {};
+    if (spec.envKey && spec.envValue) {
+      env[spec.envKey] = spec.envValue;
+    }
+    const id = addMCPServer({
+      name: spec.title,
+      transport: 'stdio',
+      url: '',
+      stdioConfig: {
+        command: spec.command,
+        args: spec.args,
+        env: Object.keys(env).length > 0 ? env : undefined,
+      },
+      enabled: true,
+    });
+    try {
+      await connectMCPServer(id);
+    } catch {
+      /* error surfaces on the store entry's lastError */
+    }
+  };
+
+  // Detect "already installed" for a search-result entry.
+  const isSearchResultInstalled = (r: McpSearchResult): boolean => {
+    if (r.endpointType === 'http' && r.endpointUrl) {
+      return installedHttpUrls.has(r.endpointUrl);
+    }
+    if (r.endpointType === 'stdio-tauri') {
+      // We use the package name as the install title for stdio-tauri,
+      // mirroring what `handleInstall` does.
+      return installedStdioTitles.has(r.title);
+    }
+    return false;
+  };
+
   return (
     <section>
       <h2 className="text-lg font-semibold mb-1 flex items-center gap-2">
@@ -2692,16 +2807,73 @@ function McpMarketSection() {
         MCP 市场
       </h2>
       <p className="text-sm text-claude-muted dark:text-night-muted mb-3">
-        外部 MCP 服务器精选。HTTP endpoint 浏览器 / 桌面都能一键装；stdio MCP{' '}
+        搜遍 4 大 MCP 平台（PulseMCP / Glama / npm / GitHub）+ 6 条精选推荐。
+        <strong> 三层信任徽章</strong>：🟢 官方一键 / 🟡 流行（带详情）/ 🔴
+        未审核（需勾选确认）。
         {isOnTauri ? (
-          <>桌面版自动 spawn 子进程（需要系统装了 Node.js）。</>
+          <> 桌面版可 spawn npx 子进程（系统需装 Node.js）。</>
         ) : (
-          <>仅在桌面版可一键，网页版只能看安装命令。</>
+          <> 网页版只能装 HTTP MCP；stdio 类需要桌面版。</>
         )}
-        来源 + license 每条都标注。
       </p>
+
+      {/* Search box */}
+      <div className="relative mb-3">
+        <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-claude-muted dark:text-night-muted pointer-events-none" />
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="搜索 MCP server，如 'memory' / 'filesystem' / 'slack' / 'postgres'…"
+          className="w-full pl-8 pr-8 py-2 text-sm rounded-md border border-claude-border dark:border-night-border bg-white dark:bg-night-bg focus:outline-none focus:border-claude-accent"
+        />
+        {query && (
+          <button
+            type="button"
+            onClick={() => setQuery('')}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-claude-muted hover:text-claude-ink dark:hover:text-night-ink"
+            aria-label="清除"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        )}
+      </div>
+
+      {/* Status line for active search */}
+      {showingSearch && (
+        <div className="text-xs text-claude-muted dark:text-night-muted mb-2 flex items-center gap-2">
+          {searchLoading && (
+            <>
+              <Loader2 className="w-3 h-3 animate-spin" />
+              在 4 个 MCP 平台 + 官方包列表上搜「{debounced}」…
+            </>
+          )}
+          {!searchLoading && searchError && (
+            <span className="text-red-500">搜索失败：{searchError}</span>
+          )}
+          {!searchLoading && !searchError && searchResults && (
+            <>
+              找到 {searchResults.length} 条
+              {fromCache && <span className="opacity-60">（缓存）</span>}
+              {searchResults.length > 0 && (
+                <span className="opacity-60">
+                  ·{' '}
+                  {searchResults.filter((r) => r.trustTier === 'official').length}{' '}
+                  官方 ·{' '}
+                  {searchResults.filter((r) => r.trustTier === 'popular').length}{' '}
+                  流行 ·{' '}
+                  {searchResults.filter((r) => r.trustTier === 'unaudited').length}{' '}
+                  未审核
+                </span>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       <div className="space-y-2">
-        {MCP_MARKET.map((entry) => {
+        {!showingSearch &&
+          MCP_MARKET.map((entry) => {
           const httpInstalled =
             entry.endpointType === 'http' &&
             entry.endpointUrl !== undefined &&
@@ -2774,9 +2946,342 @@ function McpMarketSection() {
             />
           );
         })}
+        {showingSearch &&
+          searchResults &&
+          searchResults.map((r) => (
+            <McpSearchRow
+              key={r.id}
+              result={r}
+              installed={isSearchResultInstalled(r)}
+              isOnTauri={isOnTauri}
+              onInstall={handleInstall}
+            />
+          ))}
+        {showingSearch &&
+          !searchLoading &&
+          !searchError &&
+          searchResults &&
+          searchResults.length === 0 && (
+            <div className="text-sm text-claude-muted dark:text-night-muted py-6 text-center">
+              没找到匹配的 MCP server。试试别的关键词，或者直接到上面的「MCP 服务器」section 手动添加 URL。
+            </div>
+          )}
       </div>
     </section>
   );
+}
+
+/**
+ * Row for a federated-search MCP result. Parallel to McpMarketRow but
+ * adapted to the McpSearchResult shape and the trust-tier UX gate:
+ *
+ *   🟢 official    : install button enabled out of the box
+ *   🟡 popular     : install button enabled, details panel auto-expands
+ *                    on first interest (user can collapse)
+ *   🔴 unaudited   : install button disabled until user ticks "I
+ *                    understand this runs <publisher>'s code on my machine"
+ *
+ * The whole gate is client-side UX — the Worker doesn't enforce it.
+ */
+function McpSearchRow({
+  result,
+  installed,
+  isOnTauri,
+  onInstall,
+}: {
+  result: McpSearchResult;
+  installed: boolean;
+  isOnTauri: boolean;
+  onInstall: (
+    spec:
+      | { kind: 'http'; title: string; url: string; token?: string }
+      | {
+          kind: 'stdio-tauri';
+          title: string;
+          command: string;
+          args: string[];
+          envKey?: string;
+          envValue?: string;
+        }
+      | { kind: 'unsupported'; reason: string },
+  ) => Promise<void> | void;
+}) {
+  // 🟡 popular auto-expands details to nudge the user to look before
+  // installing — the trust gate is "informed consent" for popular tier.
+  const [expanded, setExpanded] = useState(result.trustTier === 'popular');
+  const [acked, setAcked] = useState(false);
+  const [tokenValue, setTokenValue] = useState('');
+  const [installing, setInstalling] = useState(false);
+
+  const tierMeta: Record<TrustTier, { label: string; cls: string }> = {
+    official: {
+      label: '🟢 官方',
+      cls: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400',
+    },
+    popular: {
+      label: '🟡 流行',
+      cls: 'bg-amber-500/10 text-amber-700 dark:text-amber-400',
+    },
+    unaudited: {
+      label: '🔴 未审核',
+      cls: 'bg-red-500/10 text-red-700 dark:text-red-400',
+    },
+  };
+  const tier = tierMeta[result.trustTier];
+
+  // Can the install button do real work? HTTP always; stdio-tauri only
+  // when running on the desktop. stdio-instructions = manual only.
+  const canInstall = (() => {
+    if (result.endpointType === 'http') return Boolean(result.endpointUrl);
+    if (result.endpointType === 'stdio-tauri') return isOnTauri;
+    return false; // stdio-instructions
+  })();
+
+  const needsAck = result.trustTier === 'unaudited';
+  const installEnabled = canInstall && !installed && !installing && (!needsAck || acked);
+
+  const envKeyForInput = result.stdioCommand?.envKeys?.[0];
+  const needsTokenInput =
+    canInstall &&
+    result.endpointType === 'stdio-tauri' &&
+    Boolean(envKeyForInput);
+
+  const handleClick = async () => {
+    setInstalling(true);
+    try {
+      if (result.endpointType === 'http' && result.endpointUrl) {
+        await onInstall({
+          kind: 'http',
+          title: result.title,
+          url: result.endpointUrl,
+        });
+      } else if (
+        result.endpointType === 'stdio-tauri' &&
+        result.stdioCommand &&
+        isOnTauri
+      ) {
+        await onInstall({
+          kind: 'stdio-tauri',
+          title: result.title,
+          command: result.stdioCommand.command,
+          args: result.stdioCommand.args,
+          envKey: envKeyForInput,
+          envValue: tokenValue,
+        });
+      } else {
+        await onInstall({
+          kind: 'unsupported',
+          reason: isOnTauri
+            ? '这条 MCP 需要手动安装——展开详情看说明。'
+            : '网页版不能 spawn 本地进程。请下载桌面版 Flaude，或本地启动后用 mcp-proxy 包成 HTTP。',
+        });
+      }
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  return (
+    <div className="p-3 rounded-md border border-claude-border dark:border-night-border space-y-2">
+      <div className="flex items-start gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-medium text-sm break-all">{result.title}</span>
+            <span className={cn('text-[10px] px-1.5 py-0.5 rounded', tier.cls)}>
+              {tier.label}
+            </span>
+            <span
+              className={cn(
+                'text-[10px] px-1.5 py-0.5 rounded',
+                result.endpointType === 'http'
+                  ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
+                  : result.endpointType === 'stdio-tauri'
+                    ? 'bg-blue-500/10 text-blue-700 dark:text-blue-400'
+                    : 'bg-zinc-500/10 text-zinc-700 dark:text-zinc-400',
+              )}
+            >
+              {result.endpointType === 'http'
+                ? 'HTTP'
+                : result.endpointType === 'stdio-tauri'
+                  ? `stdio${isOnTauri ? '' : '·桌面'}`
+                  : '需手动'}
+            </span>
+            {result.signals.license && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded font-mono bg-black/[0.05] dark:bg-white/[0.07] text-claude-muted dark:text-night-muted">
+                {result.signals.license}
+              </span>
+            )}
+            {installed && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1">
+                <CheckCircle2 className="w-3 h-3" />
+                已安装
+              </span>
+            )}
+          </div>
+          <div className="text-xs text-claude-muted dark:text-night-muted mt-1">
+            {result.description || <em>（无描述）</em>}
+          </div>
+          <div className="text-[11px] text-claude-muted dark:text-night-muted mt-1.5 flex flex-wrap items-center gap-x-2">
+            <span>by @{result.publisher}</span>
+            {result.signals.npmWeeklyDownloads != null && (
+              <span>· ⬇ {fmtNum(result.signals.npmWeeklyDownloads)}/周</span>
+            )}
+            {result.signals.githubStars != null && (
+              <span>· ⭐ {fmtNum(result.signals.githubStars)}</span>
+            )}
+            {result.signals.lastUpdate && (
+              <span>· 更新 {fmtDate(result.signals.lastUpdate)}</span>
+            )}
+            <span>
+              ·{' '}
+              {result.sources.length > 1
+                ? `${result.sources.length} 个来源`
+                : result.sources[0]}
+            </span>
+          </div>
+        </div>
+        <div className="flex flex-col gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="btn-ghost text-xs"
+          >
+            {expanded ? (
+              <ChevronDown className="w-3.5 h-3.5" />
+            ) : (
+              <ChevronRight className="w-3.5 h-3.5" />
+            )}
+            详情
+          </button>
+          {canInstall && (
+            <button
+              type="button"
+              disabled={!installEnabled}
+              onClick={handleClick}
+              className="btn-primary text-xs disabled:opacity-50"
+              title={
+                !canInstall
+                  ? '不可一键安装'
+                  : needsAck && !acked
+                    ? '请先勾选确认'
+                    : undefined
+              }
+            >
+              <Download className="w-3.5 h-3.5" />
+              {installed ? '已装' : installing ? '安装中…' : '安装'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="border-t border-claude-border/50 dark:border-night-border/50 pt-2 space-y-2 text-xs">
+          {/* Source links */}
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-claude-muted dark:text-night-muted">
+            {Object.entries(result.sourceUrls).map(([src, url]) =>
+              url ? (
+                <a
+                  key={src}
+                  href={url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline hover:text-claude-ink dark:hover:text-night-ink"
+                >
+                  在 {src} 上查看 ↗
+                </a>
+              ) : null,
+            )}
+          </div>
+
+          {/* Install command (stdio) or HTTP URL */}
+          {result.endpointType === 'http' && result.endpointUrl && (
+            <div>
+              HTTP endpoint：
+              <code className="font-mono break-all ml-1">
+                {result.endpointUrl}
+              </code>
+            </div>
+          )}
+          {result.stdioCommand && (
+            <div>
+              {result.endpointType === 'stdio-tauri' && isOnTauri
+                ? '安装会执行：'
+                : '本地启动命令（需自己跑）：'}
+              <code className="font-mono break-all ml-1">
+                {result.stdioCommand.command}{' '}
+                {result.stdioCommand.args.join(' ')}
+              </code>
+            </div>
+          )}
+          {result.endpointType === 'stdio-instructions' &&
+            !result.stdioCommand &&
+            result.installInstructions && (
+              <pre className="text-[11px] font-mono whitespace-pre-wrap break-words bg-black/[0.03] dark:bg-white/[0.03] rounded p-2 max-h-40 overflow-y-auto">
+                {result.installInstructions}
+              </pre>
+            )}
+
+          {/* Token / env input */}
+          {needsTokenInput && envKeyForInput && (
+            <div className="space-y-1">
+              <div className="text-claude-muted dark:text-night-muted">
+                环境变量{' '}
+                <code className="font-mono">{envKeyForInput}</code>
+                （安装时注入到子进程）
+              </div>
+              <input
+                type="password"
+                value={tokenValue}
+                onChange={(e) => setTokenValue(e.target.value)}
+                placeholder={`粘贴 ${envKeyForInput}…`}
+                className="w-full px-2 py-1 text-xs rounded border border-claude-border dark:border-night-border bg-white dark:bg-night-bg font-mono"
+              />
+            </div>
+          )}
+
+          {/* 🔴 Unaudited: explicit ack checkbox */}
+          {needsAck && (
+            <label className="flex items-start gap-2 p-2 rounded bg-red-500/5 border border-red-500/20 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={acked}
+                onChange={(e) => setAcked(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span className="text-[11px] text-red-700 dark:text-red-400">
+                ⚠️ 我理解：安装后 Flaude 会
+                {result.endpointType === 'stdio-tauri'
+                  ? '在我电脑上以我的权限运行 '
+                  : '让我的对话数据流给 '}
+                <strong>@{result.publisher}</strong> 写的代码。这条是「未审核」徽章——下载量低、无明显质量信号，可能是新发布或小众。装之前最好点上面的链接看下源码。
+              </span>
+            </label>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function fmtNum(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
+function fmtDate(iso: string): string {
+  try {
+    const d = new Date(iso);
+    const now = new Date();
+    const days = Math.floor((+now - +d) / (1000 * 60 * 60 * 24));
+    if (days < 1) return '今天';
+    if (days < 7) return `${days} 天前`;
+    if (days < 30) return `${Math.floor(days / 7)} 周前`;
+    if (days < 365) return `${Math.floor(days / 30)} 月前`;
+    return `${Math.floor(days / 365)} 年前`;
+  } catch {
+    return iso.slice(0, 10);
+  }
 }
 
 function McpMarketRow({
