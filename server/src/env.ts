@@ -34,6 +34,18 @@ export interface Env {
   //   so quota sits at the operator's account, not per-user. Omit to disable
   //   web_search server-wide.
   BOCHA_API_KEY?: string;
+
+  // GitHub PAT for the Skills marketplace federated-search endpoint
+  //   (`/api/skills/search`). Only needs `public_repo` read scope — we just
+  //   call /search/code, /repos/.../license, and raw.githubusercontent.com.
+  //
+  //   Without a token: GitHub allows ~10 search reqs/min from a Worker IP,
+  //   which the Cache API absorbs for repeated queries but is tight.
+  //   With a token:    5000 reqs/hour shared across all users — comfortable.
+  //
+  //   Generate at https://github.com/settings/tokens (classic, public_repo)
+  //   and `pnpm wrangler secret put GITHUB_TOKEN` to install on production.
+  GITHUB_TOKEN?: string;
 }
 
 /**

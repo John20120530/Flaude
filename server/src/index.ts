@@ -36,6 +36,7 @@ import chat from './chat';
 import type { AppContext, Env } from './env';
 import mcpDemo from './mcpDemo';
 import { requireAuth } from './middleware';
+import skillsSearch from './skillsSearch';
 import sync from './sync';
 import tools from './tools';
 
@@ -249,6 +250,16 @@ app.get('/auth/me', requireAuth, async (c) => {
 //   POST /mcp/echo   — minimal MCP HTTP server with one `echo` tool.
 // -----------------------------------------------------------------------------
 app.route('/', mcpDemo);
+
+// -----------------------------------------------------------------------------
+// Skills marketplace federated search (./skillsSearch.ts).
+//   GET /api/skills/search?q=<keyword>
+//
+// Same mount-order rule as mcpDemo: must come before chat's '*' middleware
+// so the path-specific requireAuth inside skillsSearch is what gates this
+// endpoint, not chat's blanket auth (which would fire first and 401 us).
+// -----------------------------------------------------------------------------
+app.route('/', skillsSearch);
 
 // -----------------------------------------------------------------------------
 // Chat proxy + /usage (mounted from ./chat.ts — requireAuth is applied inside
