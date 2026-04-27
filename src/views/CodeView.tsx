@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import {
   Terminal as TerminalIcon,
   GitBranch,
+  Activity,
   FolderOpen,
   Wrench,
   FolderPlus,
@@ -18,6 +19,8 @@ import Composer from '@/components/chat/Composer';
 import ToolActivityPanel from '@/components/chat/ToolActivityPanel';
 import FileTree from '@/components/code/FileTree';
 import Terminal from '@/components/code/Terminal';
+import BackgroundTasksPanel from '@/components/code/BackgroundTasksPanel';
+import { useBackgroundTasks } from '@/hooks/useBackgroundTasks';
 import TodoPanel from '@/components/code/TodoPanel';
 import { useStreamedChat } from '@/hooks/useStreamedChat';
 import { cn } from '@/lib/utils';
@@ -149,10 +152,17 @@ export default function CodeView() {
     }
   }, [conversationId, conversation, newConversation, navigate, setActiveConversation]);
 
-  const [bottomTab, setBottomTab] = useState<'tools' | 'terminal' | 'git'>(
+  const [bottomTab, setBottomTab] = useState<'tools' | 'terminal' | 'git' | 'background'>(
     'tools'
   );
   const [showHidden, setShowHidden] = useState(false);
+
+  // We poll bgshell from CodeView (not just the panel) so the tab badge
+  // shows a running count even when the user is on the Tools/Terminal tab.
+  // Cost: one IPC call every 2s. Pays for itself the first time someone
+  // forgets they left a `pnpm test --watch` running and the panel beckons.
+  const bgTasks = useBackgroundTasks({ active: true });
+  const runningCount = bgTasks.tasks.filter((t) => t.running).length;
 
   const chat = useStreamedChat({
     conversation: conversation ?? {
@@ -306,7 +316,7 @@ export default function CodeView() {
         {/* Bottom tabs */}
         <div className="h-[180px] shrink-0 border-t border-claude-border dark:border-night-border bg-claude-surface dark:bg-night-surface">
           <div className="h-8 flex items-center border-b border-claude-border dark:border-night-border">
-            {(['tools', 'terminal', 'git'] as const).map((t) => (
+            {(['tools', 'terminal', 'git', 'background'] as const).map((t) => (
               <button
                 key={t}
                 onClick={() => setBottomTab(t)}
@@ -325,9 +335,21 @@ export default function CodeView() {
                   <>
                     <TerminalIcon className="w-3.5 h-3.5" /> Terminal
                   </>
-                ) : (
+                ) : t === 'git' ? (
                   <>
                     <GitBranch className="w-3.5 h-3.5" /> Git
+                  </>
+                ) : (
+                  <>
+                    <Activity className="w-3.5 h-3.5" /> 后台任务
+                    {runningCount > 0 && (
+                      <span
+                        className="ml-0.5 inline-flex items-center justify-center min-w-[1.1rem] h-[1.1rem] px-1 rounded-full text-[10px] font-medium bg-emerald-500 text-white"
+                        aria-label={`${runningCount} 个后台任务正在运行`}
+                      >
+                        {runningCount}
+                      </span>
+                    )}
                   </>
                 )}
               </button>
@@ -352,6 +374,9 @@ export default function CodeView() {
               {workspacePath
                 ? '让 Agent 调用 shell_exec 跑 `git status` 查看状态。'
                 : '打开工作区后可通过 shell_exec 使用 git。'}
+            </div>
+            <div className={cn('absolute inset-0 overflow-hidden', bottomTab !== 'background' && 'hidden')}>
+              <BackgroundTasksPanel active={bottomTab === 'background'} />
             </div>
           </div>
         </div>
