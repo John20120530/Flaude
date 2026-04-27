@@ -29,6 +29,8 @@ import {
   Zap,
   ChevronDown,
   ChevronRight,
+  Search,
+  X,
 } from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
 import { cn } from '@/lib/utils';
@@ -66,6 +68,7 @@ import {
 } from '@/config/skillsMarket';
 import { MCP_MARKET, type McpMarketEntry } from '@/config/mcpMarket';
 import { parseSkillMd } from '@/lib/skillsImport';
+import { searchSkillsMarket } from '@/lib/skillsSearch';
 
 export default function SettingsView() {
   const providers = useAppStore((s) => s.providers);
@@ -2245,6 +2248,77 @@ function SkillsMarketSection() {
     [skills],
   );
 
+  // Search state. Empty `query` shows the curated baseline; non-empty
+  // triggers a federated GitHub search via the Worker. We debounce the
+  // network call by 350ms — feels responsive while typing without
+  // hammering the upstream during a long word.
+  const [query, setQuery] = useState('');
+  const [debounced, setDebounced] = useState('');
+  const [results, setResults] = useState<SkillsMarketEntry[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [fromCache, setFromCache] = useState(false);
+  // Track the latest in-flight query so a slow earlier response doesn't
+  // overwrite a fresher one (race when user types fast).
+  const inflightRef = useRef(0);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(query.trim()), 350);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  useEffect(() => {
+    if (!debounced) {
+      setResults(null);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+    const ticket = ++inflightRef.current;
+    setLoading(true);
+    setError(null);
+    void searchSkillsMarket(debounced)
+      .then((res) => {
+        if (inflightRef.current !== ticket) return; // a newer query won
+        setResults(res.results);
+        setFromCache(res.fromCache);
+        setLoading(false);
+      })
+      .catch((e: Error) => {
+        if (inflightRef.current !== ticket) return;
+        setError(e.message || '搜索失败');
+        setResults(null);
+        setLoading(false);
+      });
+  }, [debounced]);
+
+  // Decide what to render:
+  //   - empty query   → curated baseline (8 entries from SKILLS_MARKET)
+  //   - active search → results (or loading / error / empty states)
+  //
+  // When showing search results, we union them with curated entries that
+  // also match the query (substring on title/description) — those float
+  // to the top with a "推荐" badge. Why: a user searching "java" should
+  // see the curated "Java Clean Code" on top even though it'd also be
+  // found via GitHub.
+  const showingSearch = debounced.length > 0;
+  const matchedCurated = useMemo(() => {
+    if (!showingSearch) return [];
+    const q = debounced.toLowerCase();
+    return SKILLS_MARKET.filter(
+      (e) =>
+        e.title.toLowerCase().includes(q) ||
+        e.description.toLowerCase().includes(q) ||
+        (e.tags ?? []).some((t) => t.toLowerCase().includes(q)),
+    );
+  }, [showingSearch, debounced]);
+
+  const dedupedResults = useMemo(() => {
+    if (!showingSearch || !results) return [];
+    const curatedIds = new Set(matchedCurated.map((e) => e.id));
+    return results.filter((r) => !curatedIds.has(r.id));
+  }, [showingSearch, results, matchedCurated]);
+
   return (
     <section>
       <h2 className="text-lg font-semibold mb-1 flex items-center gap-2">
@@ -2252,26 +2326,110 @@ function SkillsMarketSection() {
         Skills 市场
       </h2>
       <p className="text-sm text-claude-muted dark:text-night-muted mb-3">
-        从 Anthropic 官方 skills 仓 + 社区源拉来的可一键安装 skill。点「预览」看完整内容，点「安装」加到上面的「Skills」列表。
-        <strong> 来源每条都标注</strong>——发布方 / 原仓库 / license 都看得到。
+        搜整个 GitHub 上的 SKILL.md 文件 + 8 条精选推荐。
+        <strong> 严格 MIT / Apache 过滤</strong>——非这两种 license 的 skill 直接不显示。
+        每条都标注来源 / license / publisher。
       </p>
+
+      {/* Search box */}
+      <div className="relative mb-3">
+        <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-claude-muted dark:text-night-muted pointer-events-none" />
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="搜索关键词，如 'java' / 'pdf' / 'review' / 'memory'…"
+          className="w-full pl-8 pr-8 py-2 text-sm rounded-md border border-claude-border dark:border-night-border bg-white dark:bg-night-bg focus:outline-none focus:border-claude-accent"
+        />
+        {query && (
+          <button
+            type="button"
+            onClick={() => setQuery('')}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-claude-muted hover:text-claude-ink dark:hover:text-night-ink"
+            aria-label="清除"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        )}
+      </div>
+
+      {/* Status line */}
+      {showingSearch && (
+        <div className="text-xs text-claude-muted dark:text-night-muted mb-2 flex items-center gap-2">
+          {loading && (
+            <>
+              <Loader2 className="w-3 h-3 animate-spin" />
+              在 GitHub 上搜「{debounced}」…
+            </>
+          )}
+          {!loading && error && (
+            <span className="text-red-500">搜索失败：{error}</span>
+          )}
+          {!loading && !error && results && (
+            <>
+              找到 {matchedCurated.length + dedupedResults.length} 条匹配
+              {fromCache && <span className="opacity-60">（缓存）</span>}
+              {matchedCurated.length > 0 && (
+                <span className="opacity-60">
+                  · 含 {matchedCurated.length} 条精选推荐
+                </span>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Results / curated baseline */}
       <div className="space-y-2">
-        {SKILLS_MARKET.map((entry) => (
-          <SkillsMarketRow
-            key={entry.id}
-            entry={entry}
-            installed={installedNames.has(skillNameFromId(entry.id))}
-            onInstall={async () => {
-              const result = await installMarketSkill(entry, addSkill);
-              if (result.ok) {
-                // Soft success — the row will re-render as "已安装" once
-                // store updates propagate. No toast needed.
-              } else {
-                alert(`安装失败：${result.error}`);
-              }
-            }}
-          />
-        ))}
+        {!showingSearch &&
+          SKILLS_MARKET.map((entry) => (
+            <SkillsMarketRow
+              key={entry.id}
+              entry={entry}
+              source="curated"
+              installed={installedNames.has(skillNameFromId(entry.id))}
+              onInstall={async () => {
+                const result = await installMarketSkill(entry, addSkill);
+                if (!result.ok) alert(`安装失败：${result.error}`);
+              }}
+            />
+          ))}
+        {showingSearch &&
+          matchedCurated.map((entry) => (
+            <SkillsMarketRow
+              key={`curated-${entry.id}`}
+              entry={entry}
+              source="curated"
+              installed={installedNames.has(skillNameFromId(entry.id))}
+              onInstall={async () => {
+                const result = await installMarketSkill(entry, addSkill);
+                if (!result.ok) alert(`安装失败：${result.error}`);
+              }}
+            />
+          ))}
+        {showingSearch &&
+          dedupedResults.map((entry) => (
+            <SkillsMarketRow
+              key={`search-${entry.id}`}
+              entry={entry}
+              source="search"
+              installed={installedNames.has(skillNameFromId(entry.id))}
+              onInstall={async () => {
+                const result = await installMarketSkill(entry, addSkill);
+                if (!result.ok) alert(`安装失败：${result.error}`);
+              }}
+            />
+          ))}
+        {showingSearch &&
+          !loading &&
+          !error &&
+          results &&
+          matchedCurated.length === 0 &&
+          dedupedResults.length === 0 && (
+            <div className="text-sm text-claude-muted dark:text-night-muted py-6 text-center">
+              没找到 MIT/Apache 授权的 skill。试试别的关键词，或者直接到上面的「Skills」section 手写一条。
+            </div>
+          )}
       </div>
     </section>
   );
@@ -2289,10 +2447,15 @@ function SkillsMarketRow({
   entry,
   installed,
   onInstall,
+  source,
 }: {
   entry: SkillsMarketEntry;
   installed: boolean;
   onInstall: () => void | Promise<void>;
+  /** Provenance — affects the badge shown next to the title. `curated`
+   *  comes from the static `SKILLS_MARKET` manifest, `search` from
+   *  GitHub federated search. Optional for back-compat. */
+  source?: 'curated' | 'search';
 }) {
   const [expanded, setExpanded] = useState(false);
   const [previewState, setPreviewState] = useState<
@@ -2332,19 +2495,43 @@ function SkillsMarketRow({
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-medium text-sm">{entry.title}</span>
+            {source === 'curated' && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-700 dark:text-amber-400 inline-flex items-center gap-0.5">
+                <Sparkles className="w-2.5 h-2.5" />
+                推荐
+              </span>
+            )}
+            {source === 'search' && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-700 dark:text-blue-400 inline-flex items-center gap-0.5">
+                <Search className="w-2.5 h-2.5" />
+                GitHub
+              </span>
+            )}
+            <span
+              className={cn(
+                'text-[10px] px-1.5 py-0.5 rounded font-mono',
+                entry.license === 'MIT'
+                  ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
+                  : 'bg-purple-500/10 text-purple-700 dark:text-purple-400',
+              )}
+            >
+              {entry.license}
+            </span>
             {entry.modes.length > 0 && (
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/[0.05] dark:bg-white/[0.07] text-claude-muted dark:text-night-muted">
                 {entry.modes.join(' / ')}
               </span>
             )}
-            {entry.tags?.map((t) => (
-              <span
-                key={t}
-                className="text-[10px] px-1.5 py-0.5 rounded bg-claude-accent/10 text-claude-accent"
-              >
-                {t}
-              </span>
-            ))}
+            {entry.tags
+              ?.filter((t) => t !== 'github-search')
+              .map((t) => (
+                <span
+                  key={t}
+                  className="text-[10px] px-1.5 py-0.5 rounded bg-claude-accent/10 text-claude-accent"
+                >
+                  {t}
+                </span>
+              ))}
             {installed && (
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1">
                 <CheckCircle2 className="w-3 h-3" />
