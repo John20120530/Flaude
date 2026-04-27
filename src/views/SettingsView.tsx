@@ -60,6 +60,12 @@ import {
   previewImportBundle,
   type ImportPreview,
 } from '@/lib/accountImport';
+import {
+  SKILLS_MARKET,
+  type SkillsMarketEntry,
+} from '@/config/skillsMarket';
+import { MCP_MARKET, type McpMarketEntry } from '@/config/mcpMarket';
+import { parseSkillMd } from '@/lib/skillsImport';
 
 export default function SettingsView() {
   const providers = useAppStore((s) => s.providers);
@@ -117,7 +123,9 @@ export default function SettingsView() {
         <MemorySection />
         <DataSection />
         <SkillsSection />
+        <SkillsMarketSection />
         <MCPSection />
+        <McpMarketSection />
         <SlashSection />
         <HooksSection />
         <ToolsSection />
@@ -2191,4 +2199,471 @@ function groupBySource(
   }
   for (const [, arr] of out) arr.sort((a, b) => a.name.localeCompare(b.name));
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Skills Marketplace section — browse + install curated external skills
+// ---------------------------------------------------------------------------
+//
+// Static manifest baked at build time (src/config/skillsMarket.ts). Each
+// entry points at a raw GitHub URL for the SKILL.md content; we lazy-fetch
+// only when the user clicks Preview / Install. Adapter parses YAML
+// frontmatter + body (src/lib/skillsImport.ts) and converts to Flaude's
+// Skill shape.
+//
+// "Already installed" detection: we tag installed skills with a hidden
+// `marketId` field stashed inside their `description` (lossy) — actually
+// no, simpler: we re-derive by name. If the user's skills include one
+// whose `name` matches the parsed SKILL.md `name`, we mark the market
+// entry as installed. Imperfect (user could rename) but good enough for
+// v1; the worst case is "install" appearing twice with no harm.
+
+function SkillsMarketSection() {
+  const skills = useAppStore((s) => s.skills);
+  const addSkill = useAppStore((s) => s.addSkill);
+  const installedNames = useMemo(
+    () => new Set(skills.map((sk) => sk.name)),
+    [skills],
+  );
+
+  return (
+    <section>
+      <h2 className="text-lg font-semibold mb-1 flex items-center gap-2">
+        <Sparkles className="w-4 h-4" />
+        Skills 市场
+      </h2>
+      <p className="text-sm text-claude-muted dark:text-night-muted mb-3">
+        从 Anthropic 官方 skills 仓 + 社区源拉来的可一键安装 skill。点「预览」看完整内容，点「安装」加到上面的「Skills」列表。
+        <strong> 来源每条都标注</strong>——发布方 / 原仓库 / license 都看得到。
+      </p>
+      <div className="space-y-2">
+        {SKILLS_MARKET.map((entry) => (
+          <SkillsMarketRow
+            key={entry.id}
+            entry={entry}
+            installed={installedNames.has(skillNameFromId(entry.id))}
+            onInstall={async () => {
+              const result = await installMarketSkill(entry, addSkill);
+              if (result.ok) {
+                // Soft success — the row will re-render as "已安装" once
+                // store updates propagate. No toast needed.
+              } else {
+                alert(`安装失败：${result.error}`);
+              }
+            }}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/** Best-effort guess at the skill's `name` field from its market id. The
+ *  market id is `<publisher>/<slug>`, and Anthropic's convention is that
+ *  the SKILL.md name == the slug minus the `skills-` prefix. */
+function skillNameFromId(marketId: string): string {
+  const slug = marketId.split('/').pop() ?? '';
+  return slug.replace(/^skills-/, '');
+}
+
+function SkillsMarketRow({
+  entry,
+  installed,
+  onInstall,
+}: {
+  entry: SkillsMarketEntry;
+  installed: boolean;
+  onInstall: () => void | Promise<void>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [previewState, setPreviewState] = useState<
+    | { kind: 'idle' }
+    | { kind: 'loading' }
+    | { kind: 'ok'; body: string }
+    | { kind: 'error'; message: string }
+  >({ kind: 'idle' });
+  const [installing, setInstalling] = useState(false);
+
+  const loadPreview = async () => {
+    setPreviewState({ kind: 'loading' });
+    try {
+      const r = await fetch(entry.rawUrl);
+      if (!r.ok) {
+        setPreviewState({
+          kind: 'error',
+          message: `HTTP ${r.status}：从 GitHub 拉 SKILL.md 失败`,
+        });
+        return;
+      }
+      const text = await r.text();
+      const parsed = parseSkillMd(text);
+      if (!parsed.ok) {
+        setPreviewState({ kind: 'error', message: parsed.error });
+        return;
+      }
+      setPreviewState({ kind: 'ok', body: parsed.parsed.body });
+    } catch (e) {
+      setPreviewState({ kind: 'error', message: (e as Error).message });
+    }
+  };
+
+  return (
+    <div className="p-3 rounded-md border border-claude-border dark:border-night-border space-y-2">
+      <div className="flex items-start gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-medium text-sm">{entry.title}</span>
+            {entry.modes.length > 0 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/[0.05] dark:bg-white/[0.07] text-claude-muted dark:text-night-muted">
+                {entry.modes.join(' / ')}
+              </span>
+            )}
+            {entry.tags?.map((t) => (
+              <span
+                key={t}
+                className="text-[10px] px-1.5 py-0.5 rounded bg-claude-accent/10 text-claude-accent"
+              >
+                {t}
+              </span>
+            ))}
+            {installed && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1">
+                <CheckCircle2 className="w-3 h-3" />
+                已安装
+              </span>
+            )}
+          </div>
+          <div className="text-xs text-claude-muted dark:text-night-muted mt-1">
+            {entry.description}
+          </div>
+          <div className="text-[11px] text-claude-muted dark:text-night-muted mt-1.5">
+            {entry.publisher} ·{' '}
+            <a
+              href={entry.sourceUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="underline hover:text-claude-ink dark:hover:text-night-ink"
+            >
+              {entry.source}
+            </a>{' '}
+            · {entry.license}
+          </div>
+        </div>
+        <div className="flex flex-col gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setExpanded((v) => {
+                const next = !v;
+                if (next && previewState.kind === 'idle') void loadPreview();
+                return next;
+              });
+            }}
+            className="btn-ghost text-xs"
+          >
+            {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+            预览
+          </button>
+          <button
+            type="button"
+            disabled={installed || installing}
+            onClick={async () => {
+              setInstalling(true);
+              try {
+                await onInstall();
+              } finally {
+                setInstalling(false);
+              }
+            }}
+            className="btn-primary text-xs disabled:opacity-50"
+          >
+            {installing ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Download className="w-3.5 h-3.5" />
+            )}
+            {installed ? '已装' : '安装'}
+          </button>
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="border-t border-claude-border/50 dark:border-night-border/50 pt-2">
+          {previewState.kind === 'loading' && (
+            <div className="text-xs text-claude-muted dark:text-night-muted flex items-center gap-2">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              从 GitHub 拉 SKILL.md...
+            </div>
+          )}
+          {previewState.kind === 'error' && (
+            <div className="text-xs text-red-600 dark:text-red-400">
+              {previewState.message}
+            </div>
+          )}
+          {previewState.kind === 'ok' && (
+            <pre className="text-[11px] font-mono whitespace-pre-wrap break-words bg-black/[0.03] dark:bg-white/[0.03] rounded p-2 max-h-64 overflow-y-auto">
+              {previewState.body}
+            </pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Fetch SKILL.md, parse, install into the user's skills. Returns
+ *  ok/error so the row UI can surface the failure inline. */
+async function installMarketSkill(
+  entry: SkillsMarketEntry,
+  addSkill: (s: Omit<Skill, 'id' | 'createdAt' | 'updatedAt'>) => string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  let raw: string;
+  try {
+    const r = await fetch(entry.rawUrl);
+    if (!r.ok) return { ok: false, error: `HTTP ${r.status}` };
+    raw = await r.text();
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+  const parsed = parseSkillMd(raw);
+  if (!parsed.ok) return { ok: false, error: parsed.error };
+
+  // Compose the Flaude Skill. Title comes from the marketplace manifest
+  // (Chinese-friendly); name + description come from upstream
+  // frontmatter; instructions = body. Append a small attribution line so
+  // when the user later opens the skill in the editor they remember
+  // where it came from.
+  const attribution =
+    `\n\n---\n*来自 Skills 市场 · ${entry.publisher} · ` +
+    `[${entry.source}](${entry.sourceUrl}) · ${entry.license}*\n`;
+
+  addSkill({
+    name: parsed.parsed.name,
+    title: entry.title,
+    description: parsed.parsed.description,
+    instructions: parsed.parsed.body + attribution,
+    modes: entry.modes,
+    enabled: true,
+  });
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// MCP Marketplace section — browse curated MCP servers, one-click install
+// for HTTP endpoints, copy-instructions for stdio servers
+// ---------------------------------------------------------------------------
+
+function McpMarketSection() {
+  const mcpServers = useAppStore((s) => s.mcpServers);
+  const addMCPServer = useAppStore((s) => s.addMCPServer);
+  const installedUrls = useMemo(
+    () => new Set(mcpServers.map((m) => m.url)),
+    [mcpServers],
+  );
+
+  return (
+    <section>
+      <h2 className="text-lg font-semibold mb-1 flex items-center gap-2">
+        <Server className="w-4 h-4" />
+        MCP 市场
+      </h2>
+      <p className="text-sm text-claude-muted dark:text-night-muted mb-3">
+        外部 MCP 服务器精选。带 HTTP endpoint 的可以一键安装；本地 stdio MCP 显示安装命令让你自己跑（Flaude 只支持 HTTP/SSE，stdio 要先用
+        <code className="text-[11px] mx-1 px-1 rounded bg-black/[0.05] dark:bg-white/[0.07]">mcp-proxy</code>
+        包成 HTTP）。来源 + license 每条都标注。
+      </p>
+      <div className="space-y-2">
+        {MCP_MARKET.map((entry) => (
+          <McpMarketRow
+            key={entry.id}
+            entry={entry}
+            installed={
+              entry.endpointType === 'http' &&
+              entry.endpointUrl !== undefined &&
+              installedUrls.has(entry.endpointUrl)
+            }
+            onInstall={(token) => {
+              if (entry.endpointType !== 'http' || !entry.endpointUrl) {
+                alert('这是 stdio MCP，请先按上面的命令本地启动后用 mcp-proxy 暴露成 HTTP，然后到上面的「MCP 服务器」section 手动添加。');
+                return;
+              }
+              addMCPServer({
+                name: entry.title,
+                url: entry.endpointUrl,
+                token: token || undefined,
+                enabled: true,
+              });
+            }}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function McpMarketRow({
+  entry,
+  installed,
+  onInstall,
+}: {
+  entry: McpMarketEntry;
+  installed: boolean;
+  onInstall: (token: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [token, setToken] = useState('');
+  const [copied, setCopied] = useState(false);
+
+  const isStdio = entry.endpointType === 'stdio-instructions';
+
+  const copyCommand = async () => {
+    if (!entry.installInstructions) return;
+    try {
+      await navigator.clipboard.writeText(entry.installInstructions);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard may be unavailable; user can select manually */
+    }
+  };
+
+  return (
+    <div className="p-3 rounded-md border border-claude-border dark:border-night-border space-y-2">
+      <div className="flex items-start gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-medium text-sm">{entry.title}</span>
+            <span
+              className={cn(
+                'text-[10px] px-1.5 py-0.5 rounded',
+                isStdio
+                  ? 'bg-amber-500/10 text-amber-700 dark:text-amber-400'
+                  : 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400',
+              )}
+            >
+              {isStdio ? 'stdio · 需自启' : 'HTTP · 可一键装'}
+            </span>
+            {entry.authType === 'bearer' && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-700 dark:text-purple-400">
+                需 token
+              </span>
+            )}
+            {entry.tags?.map((t) => (
+              <span
+                key={t}
+                className="text-[10px] px-1.5 py-0.5 rounded bg-claude-accent/10 text-claude-accent"
+              >
+                {t}
+              </span>
+            ))}
+            {installed && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1">
+                <CheckCircle2 className="w-3 h-3" />
+                已安装
+              </span>
+            )}
+          </div>
+          <div className="text-xs text-claude-muted dark:text-night-muted mt-1">
+            {entry.description}
+          </div>
+          <div className="text-[11px] text-claude-muted dark:text-night-muted mt-1.5">
+            {entry.publisher} ·{' '}
+            <a
+              href={entry.sourceUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="underline hover:text-claude-ink dark:hover:text-night-ink"
+            >
+              {entry.source}
+            </a>{' '}
+            · {entry.license}
+            {entry.tools && entry.tools.length > 0 && (
+              <span className="ml-2 font-mono">
+                工具：{entry.tools.slice(0, 4).join(', ')}
+                {entry.tools.length > 4 && ` (+${entry.tools.length - 4} more)`}
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="flex flex-col gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="btn-ghost text-xs"
+          >
+            {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+            详情
+          </button>
+          {!isStdio && (
+            <button
+              type="button"
+              disabled={installed}
+              onClick={() => onInstall(token)}
+              className="btn-primary text-xs disabled:opacity-50"
+            >
+              <Download className="w-3.5 h-3.5" />
+              {installed ? '已装' : '安装'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="border-t border-claude-border/50 dark:border-night-border/50 pt-2 space-y-2">
+          {isStdio ? (
+            <>
+              <div className="text-xs text-claude-muted dark:text-night-muted">
+                本地启动指令：
+              </div>
+              <pre className="text-[11px] font-mono whitespace-pre-wrap break-words bg-black/[0.03] dark:bg-white/[0.03] rounded p-2 max-h-48 overflow-y-auto">
+                {entry.installInstructions}
+              </pre>
+              <button
+                type="button"
+                onClick={copyCommand}
+                className="btn-ghost text-xs"
+              >
+                {copied ? <CheckCircle2 className="w-3 h-3" /> : <Upload className="w-3 h-3" />}
+                {copied ? '已复制' : '复制全部'}
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="text-[11px] text-claude-muted dark:text-night-muted">
+                HTTP endpoint：
+                <code className="ml-1 font-mono">{entry.endpointUrl}</code>
+              </div>
+              {entry.authType === 'bearer' && (
+                <div className="space-y-1">
+                  <div className="text-xs text-claude-muted dark:text-night-muted">
+                    Bearer token（可选填，不填可先尝试匿名）
+                    {entry.authHelpUrl && (
+                      <>
+                        {' · '}
+                        <a
+                          href={entry.authHelpUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="underline"
+                        >
+                          在哪里拿 token
+                        </a>
+                      </>
+                    )}
+                  </div>
+                  <input
+                    type="password"
+                    value={token}
+                    onChange={(e) => setToken(e.target.value)}
+                    placeholder="sk-..."
+                    className="w-full px-2 py-1 text-xs font-mono rounded border border-claude-border dark:border-night-border bg-white dark:bg-night-bg focus:outline-none"
+                  />
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
