@@ -433,6 +433,96 @@ describe('serializeMessages — duplicate tool_call_id (regen race / stop overla
   });
 });
 
+describe('serializeMessages — duplicate tool_call inside one assistant message', () => {
+  // The other path: not duplicate ROLE=tool messages (handled above), but
+  // the SAME id appearing twice in a single assistant.tool_calls array.
+  // OpenAI then sees N tool_calls but only finds N-1 unique tool messages
+  // and rejects with "insufficient tool messages following tool_calls".
+
+  it('emits each tool_call_id exactly once even if it appears twice in the source array', () => {
+    const out = serializeMessages([
+      userMsg({ id: 'u', role: 'user', content: 'go' }),
+      userMsg({
+        id: 'a',
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          { id: 'A', name: 't', arguments: {}, status: 'success' },
+          { id: 'B', name: 't', arguments: {}, status: 'success' },
+          { id: 'B', name: 't', arguments: {}, status: 'success' }, // duplicate
+          { id: 'C', name: 't', arguments: {}, status: 'success' },
+        ],
+      }),
+      userMsg({
+        id: 't1', role: 'tool', content: 'a',
+        toolCalls: [{ id: 'A', name: 't', arguments: {}, status: 'success' }],
+      }),
+      userMsg({
+        id: 't2', role: 'tool', content: 'b',
+        toolCalls: [{ id: 'B', name: 't', arguments: {}, status: 'success' }],
+      }),
+      userMsg({
+        id: 't3', role: 'tool', content: 'c',
+        toolCalls: [{ id: 'C', name: 't', arguments: {}, status: 'success' }],
+      }),
+    ]);
+    const assistant = out.find((m) => m.role === 'assistant') as { tool_calls?: Array<{ id: string }> };
+    expect(assistant.tool_calls).toHaveLength(3);
+    expect(assistant.tool_calls?.map((tc) => tc.id)).toEqual(['A', 'B', 'C']);
+    // Tool messages: 3 (one per id), all present.
+    expect(out.filter((m) => m.role === 'tool')).toHaveLength(3);
+  });
+
+  it('keeps the FIRST occurrence when an assistant has the same id twice (deterministic)', () => {
+    const out = serializeMessages([
+      userMsg({
+        id: 'a',
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          { id: 'X', name: 'first-version', arguments: { v: 1 }, status: 'success' },
+          { id: 'X', name: 'second-version', arguments: { v: 2 }, status: 'success' },
+        ],
+      }),
+      userMsg({
+        id: 't', role: 'tool', content: 'r',
+        toolCalls: [{ id: 'X', name: 'first-version', arguments: {}, status: 'success' }],
+      }),
+    ]);
+    const assistant = out[0] as { tool_calls?: Array<{ id: string; function: { name: string } }> };
+    expect(assistant.tool_calls).toHaveLength(1);
+    expect(assistant.tool_calls?.[0]?.function.name).toBe('first-version');
+  });
+
+  it('still strips orphans when combined with duplicates (defense in depth)', () => {
+    // Mixed: A is good, B appears twice but is responded, C is orphan.
+    const out = serializeMessages([
+      userMsg({
+        id: 'a',
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          { id: 'A', name: 't', arguments: {}, status: 'success' },
+          { id: 'B', name: 't', arguments: {}, status: 'success' },
+          { id: 'B', name: 't', arguments: {}, status: 'success' },
+          { id: 'C', name: 't', arguments: {}, status: 'pending' }, // orphan
+        ],
+      }),
+      userMsg({
+        id: 't1', role: 'tool', content: 'a',
+        toolCalls: [{ id: 'A', name: 't', arguments: {}, status: 'success' }],
+      }),
+      userMsg({
+        id: 't2', role: 'tool', content: 'b',
+        toolCalls: [{ id: 'B', name: 't', arguments: {}, status: 'success' }],
+      }),
+    ]);
+    const assistant = out.find((m) => m.role === 'assistant') as { tool_calls?: Array<{ id: string }> };
+    expect(assistant.tool_calls?.map((tc) => tc.id)).toEqual(['A', 'B']);
+    expect(out.filter((m) => m.role === 'tool')).toHaveLength(2);
+  });
+});
+
 describe('serializeMessages — orphan tool_calls (user clicked Stop mid-call)', () => {
   it('drops a tool_call that has no matching tool message — assistant becomes plain text', () => {
     // History: user → assistant with tool_calls but NO subsequent tool message.

@@ -90,7 +90,27 @@ export function serializeMessages(messages: Message[], system?: string): WireMes
     }
 
     if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
-      const liveCalls = m.toolCalls.filter((tc) => respondedToolCallIds.has(tc.id));
+      // Two filters in one pass:
+      //   1. Drop tool_calls that have NO matching tool message anywhere
+      //      (orphans — see the v0.1.26 fix above).
+      //   2. Drop DUPLICATE tool_call_ids within this single assistant
+      //      message (in case the message store / DeepSeek streaming /
+      //      regenerate path produced a tool_calls array that contains
+      //      the same id twice). Without this dedup, the upstream emits
+      //      `tool_calls: [A, B, B, C]` with 3 tool messages following,
+      //      and OpenAI returns 400 "insufficient tool messages following
+      //      tool_calls message" because it expects 4 tool messages but
+      //      only finds 3 unique ids in the trailing tool messages.
+      //      v0.1.26 + v0.1.30 caught the orphan + duplicate-tool-message
+      //      cases; v0.1.33 closes the duplicate-on-assistant case.
+      const seenIds = new Set<string>();
+      const liveCalls: typeof m.toolCalls = [];
+      for (const tc of m.toolCalls) {
+        if (!respondedToolCallIds.has(tc.id)) continue;
+        if (seenIds.has(tc.id)) continue;
+        seenIds.add(tc.id);
+        liveCalls.push(tc);
+      }
 
       if (liveCalls.length === 0) {
         // Every tool_call was orphaned. Fall back to a plain assistant
