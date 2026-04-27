@@ -13,10 +13,17 @@
  * - **Reuses the existing wire format + tool registry + protocol-compliance
  *   fixes** (orphan strip / dedup / etc., see wireFormat.ts). The runtime
  *   loop here is the absolute minimum: stream → execute tools → recurse,
- *   no Plan mode, no Hooks (subagents don't fire hooks because the user
- *   already approved the parent's plan), no thinking-mode reasoning
- *   round-trip (DeepSeek thinking models work but won't get the
- *   `reasoning_content` echo — acceptable; subagents are short-running).
+ *   no Plan mode (subagents are autonomous), no Hooks (subagents don't
+ *   fire hooks because the user already approved the parent's plan).
+ *
+ * - **DeepSeek thinking-mode reasoning_content IS echoed.** Originally
+ *   skipped this thinking it was "fine for short subagents" — that was
+ *   wrong. The very FIRST tool call in a subagent triggers the round-trip
+ *   that requires echo, otherwise upstream returns 400 "The
+ *   reasoning_content in the thinking mode must be passed back to the
+ *   API." Same fix as v0.1.18-19 for the main chat: accumulate
+ *   `chunk.reasoningDelta` and stash it on the stored assistant message
+ *   so wireFormat.serializeMessages echoes it on the next round.
  *
  * - **Cap is tighter than the parent (15 vs. 30 rounds).** Subagents
  *   that go runaway are harder for the user to notice — they don't see
@@ -144,6 +151,7 @@ export async function runSubagent(req: SubagentRequest): Promise<SubagentResult>
     });
 
     let accumulated = '';
+    let reasoning = '';
     const toolCallsMap = new Map<string, ToolCall>();
     let finishReason: 'stop' | 'length' | 'tool_calls' | 'error' | undefined;
     let streamErr: string | undefined;
@@ -173,6 +181,15 @@ export async function runSubagent(req: SubagentRequest): Promise<SubagentResult>
         if (chunk.delta) {
           accumulated += chunk.delta;
           store.patchLastMessage(subId, { content: accumulated });
+        }
+        if (chunk.reasoningDelta) {
+          // DeepSeek thinking-mode reasoning. Accumulate but don't paint
+          // it into the visible message — UI doesn't render reasoning on
+          // subagent messages today (no thinking panel here, unlike the
+          // parent's MessageList). The critical use is feeding it back to
+          // the API on the NEXT iteration via the assistant message's
+          // `reasoning` field; serializeMessages handles the echo.
+          reasoning += chunk.reasoningDelta;
         }
         if (chunk.toolCallDelta) {
           const tc = chunk.toolCallDelta;
@@ -213,11 +230,19 @@ export async function runSubagent(req: SubagentRequest): Promise<SubagentResult>
     }
 
     // Tool calls. Patch them onto the assistant message + execute each.
+    // ALSO stash reasoning so wireFormat.serializeMessages can echo
+    // `reasoning_content` on the next round-trip — DeepSeek thinking mode
+    // 400s without it: "The reasoning_content in the thinking mode must
+    // be passed back to the API." See v0.1.18-19 for the same fix in
+    // useStreamedChat.
     const toolCalls: ToolCall[] = [...toolCallsMap.values()].map((tc) => ({
       ...tc,
       status: 'pending' as const,
     }));
-    store.patchLastMessage(subId, { toolCalls });
+    store.patchLastMessage(subId, {
+      toolCalls,
+      reasoning: reasoning || undefined,
+    });
 
     for (const tc of toolCalls) {
       // Unwrap mid-stream {__raw: jsonString} args to plain object.
