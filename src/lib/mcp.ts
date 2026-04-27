@@ -1,21 +1,30 @@
 /**
  * Browser-side Model Context Protocol (MCP) client.
  *
- * Uses the "Streamable HTTP" transport (spec: 2025-06-18):
- *   - Client POSTs a JSON-RPC request to a single endpoint.
- *   - Server responds with either application/json (single response) or
- *     text/event-stream (one or more responses over SSE).
+ * Speaks JSON-RPC 2.0 over a pluggable transport. Two transports today:
  *
- * Tools discovered on a connected server are auto-registered into the global
- * tool registry under source='mcp' with `serverId` set, so the streaming loop
- * and settings UI can treat them uniformly with built-ins.
+ *   - **HTTP** (`HttpTransport`) — the "Streamable HTTP" spec (2025-06-18):
+ *     POST a JSON-RPC request to one endpoint, get back either application/
+ *     json (single response) or text/event-stream (one or more responses
+ *     over SSE). Works in plain browsers and in Tauri.
+ *   - **Stdio** (`StdioTransport`) — newline-delimited JSON over a child
+ *     process's stdin/stdout. Tauri-only; the host module
+ *     `src-tauri/src/mcp_stdio.rs` spawns the child and exposes
+ *     `mcp_stdio_send` / `mcp_stdio_recv` IPC commands. This is how
+ *     marketplace one-click install for stdio MCPs (filesystem, github,
+ *     postgres, slack, memory, ...) actually works on desktop.
  *
- * CORS caveat: browsers can only reach MCP servers that send
- * Access-Control-Allow-Origin headers. For stdio-only servers users need to
- * run a local bridge (e.g. mcp-proxy, mcpo) exposing HTTP with CORS enabled.
+ * Tools discovered on a connected server are auto-registered into the
+ * global tool registry under source='mcp' with `serverId` set, so the
+ * streaming loop and Settings UI treat them uniformly with built-ins.
+ *
+ * Browser CORS caveat: HTTP MCPs only work if the server sends
+ * Access-Control-Allow-Origin. Tauri webviews bypass CORS. Stdio MCPs are
+ * desktop-only by design.
  */
 
 import { registerTool, unregisterBySource } from './tools';
+import { isTauri, tauriInvoke } from './tauri';
 
 interface MCPToolInfo {
   name: string;
@@ -35,14 +44,43 @@ interface MCPCallResult {
   isError?: boolean;
 }
 
-export class MCPClient {
+// ---------------------------------------------------------------------------
+// Transport interface — what MCPClient needs from the wire layer.
+// ---------------------------------------------------------------------------
+
+/**
+ * Send a JSON-RPC request and receive the matching response.
+ *
+ * The transport is responsible for correlating concurrent requests by id
+ * (each request payload gets a fresh integer id). Returns the parsed JSON
+ * result on success; throws Error with a useful message on transport or
+ * RPC failure.
+ */
+export interface MCPTransport {
+  request<T = unknown>(
+    method: string,
+    params: unknown | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<T>;
+
+  /** Fire-and-forget JSON-RPC notification (server expects no reply). */
+  notify(method: string, params?: unknown): Promise<void>;
+
+  /** Release any resources the transport holds (long-poll loops, etc.). */
+  close(): void;
+}
+
+// ---------------------------------------------------------------------------
+// HTTP transport — Streamable HTTP spec 2025-06-18.
+// ---------------------------------------------------------------------------
+
+class HttpTransport implements MCPTransport {
   private nextId = 0;
-  private initialized = false;
-  private sessionId?: string; // For servers that require Mcp-Session-Id
+  private sessionId?: string;
 
   constructor(
     private readonly url: string,
-    private readonly token?: string
+    private readonly token?: string,
   ) {}
 
   private headers(): HeadersInit {
@@ -55,11 +93,10 @@ export class MCPClient {
     return h;
   }
 
-  /** JSON-RPC request that expects a matching response. */
   async request<T = unknown>(
     method: string,
-    params?: unknown,
-    signal?: AbortSignal
+    params: unknown | undefined,
+    signal: AbortSignal | undefined,
   ): Promise<T> {
     const id = ++this.nextId;
     const body = { jsonrpc: '2.0', id, method, params };
@@ -76,7 +113,6 @@ export class MCPClient {
       throw new Error(`MCP HTTP ${res.status}: ${text || res.statusText}`);
     }
 
-    // Capture session id if the server assigned one during initialize.
     const sid = res.headers.get('Mcp-Session-Id');
     if (sid && !this.sessionId) this.sessionId = sid;
 
@@ -86,16 +122,17 @@ export class MCPClient {
     }
     const json = await res.json();
     if (json.error) {
-      throw new Error(`${json.error.message ?? 'RPC error'} (${json.error.code ?? '?'})`);
+      throw new Error(
+        `${json.error.message ?? 'RPC error'} (${json.error.code ?? '?'})`,
+      );
     }
     return json.result as T;
   }
 
-  /** Drain SSE messages until we find the response with our request id. */
   private async readSSEResponse<T>(
     res: Response,
     expectedId: number,
-    signal?: AbortSignal
+    signal?: AbortSignal,
   ): Promise<T> {
     const reader = res.body?.getReader();
     if (!reader) throw new Error('MCP 流响应无 body');
@@ -109,7 +146,6 @@ export class MCPClient {
         if (done) throw new Error('MCP SSE 关闭但未收到响应');
         buffer += decoder.decode(value, { stream: true });
 
-        // SSE events end with \n\n
         let splitIdx: number;
         while ((splitIdx = buffer.indexOf('\n\n')) !== -1) {
           const event = buffer.slice(0, splitIdx);
@@ -121,7 +157,11 @@ export class MCPClient {
           const payload = dataLine.slice(5).trim();
           if (!payload) continue;
 
-          let parsed: { id?: number; result?: unknown; error?: { message?: string; code?: number } };
+          let parsed: {
+            id?: number;
+            result?: unknown;
+            error?: { message?: string; code?: number };
+          };
           try {
             parsed = JSON.parse(payload);
           } catch {
@@ -130,7 +170,7 @@ export class MCPClient {
           if (parsed.id !== expectedId) continue;
           if (parsed.error) {
             throw new Error(
-              `${parsed.error.message ?? 'RPC error'} (${parsed.error.code ?? '?'})`
+              `${parsed.error.message ?? 'RPC error'} (${parsed.error.code ?? '?'})`,
             );
           }
           return parsed.result as T;
@@ -145,24 +185,7 @@ export class MCPClient {
     }
   }
 
-  async initialize() {
-    const result = await this.request<{
-      protocolVersion: string;
-      capabilities: Record<string, unknown>;
-      serverInfo?: { name: string; version: string };
-    }>('initialize', {
-      protocolVersion: '2025-06-18',
-      capabilities: {},
-      clientInfo: { name: 'Flaude', version: '0.1' },
-    });
-    // MCP requires a post-initialize notification.
-    await this.notify('notifications/initialized');
-    this.initialized = true;
-    return result;
-  }
-
-  /** JSON-RPC notification (no response expected). Fire-and-forget. */
-  private async notify(method: string, params?: unknown) {
+  async notify(method: string, params?: unknown): Promise<void> {
     await fetch(this.url, {
       method: 'POST',
       headers: this.headers(),
@@ -172,12 +195,255 @@ export class MCPClient {
     });
   }
 
+  close(): void {
+    /* no resources held */
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stdio transport — newline-delimited JSON over a Tauri-spawned child.
+// ---------------------------------------------------------------------------
+//
+// The Rust side (`mcp_stdio.rs`) hands us a session id when we ask it to
+// spawn. We then write requests via `mcp_stdio_send` and long-poll via
+// `mcp_stdio_recv` to receive *all* messages from the server (responses to
+// our requests, plus any unsolicited notifications). A single recv loop
+// dispatches each message to the appropriate pending-request resolver
+// (matching by JSON-RPC id) or — if no match — drops it on the floor (we
+// don't have a notification handler yet; the day a server actually sends
+// useful unsolicited notifications we can wire one).
+//
+// Concurrency: the recv loop is started lazily on first request and runs
+// until `close()`. An in-flight `request()` registers a pending resolver
+// keyed by id and awaits a Promise the loop will resolve. If the child
+// dies, pending resolvers reject with a clear error.
+
+interface PendingResolver {
+  resolve: (v: unknown) => void;
+  reject: (e: Error) => void;
+}
+
+export interface StdioRecvResult {
+  messages: string[];
+  running: boolean;
+  code: number | null;
+  killed: boolean;
+  /** Snake-case from Rust serde — kept verbatim. */
+  dropped_messages: number;
+  stderr: string;
+}
+
+/**
+ * Pluggable I/O for the stdio transport. Production wires this to Tauri
+ * `invoke('mcp_stdio_send' / 'mcp_stdio_recv', ...)`; tests inject a fake.
+ */
+export interface StdioIO {
+  send(message: string): Promise<void>;
+  /** Long-poll. Resolves with whatever's available within `waitMs`. */
+  recv(waitMs: number): Promise<StdioRecvResult>;
+}
+
+/** Production IO that talks to the Tauri host. */
+function tauriStdioIO(sessionId: string): StdioIO {
+  return {
+    send: (message) =>
+      tauriInvoke<void>('mcp_stdio_send', { id: sessionId, message }),
+    recv: (waitMs) =>
+      tauriInvoke<StdioRecvResult>('mcp_stdio_recv', {
+        id: sessionId,
+        waitMs,
+      }),
+  };
+}
+
+export class StdioTransport implements MCPTransport {
+  private nextId = 0;
+  private pending = new Map<number, PendingResolver>();
+  private recvLoopRunning = false;
+  private closed = false;
+
+  /** Buffered stderr text — exposed so the UI can show why a server died. */
+  public stderrLog = '';
+
+  /**
+   * Visible for tests; production callers should use the
+   * `createStdioTransport(sessionId)` helper.
+   */
+  constructor(private readonly io: StdioIO) {}
+
+  /** Lazily kick off the recv loop. Idempotent. */
+  private startRecvLoop(): void {
+    if (this.recvLoopRunning || this.closed) return;
+    this.recvLoopRunning = true;
+    void this.recvLoop();
+  }
+
+  private async recvLoop(): Promise<void> {
+    while (!this.closed) {
+      let result: StdioRecvResult;
+      try {
+        result = await this.io.recv(30_000);
+      } catch (e) {
+        // IPC failure usually means the host shut down or the session is
+        // gone. Reject everything pending and stop.
+        this.failAllPending(
+          new Error(`MCP stdio recv 失败: ${(e as Error).message}`),
+        );
+        this.recvLoopRunning = false;
+        return;
+      }
+
+      if (result.stderr) this.stderrLog += result.stderr;
+
+      for (const raw of result.messages) {
+        this.dispatchMessage(raw);
+      }
+
+      if (!result.running) {
+        this.failAllPending(
+          new Error(
+            `MCP stdio 进程已退出 (code=${result.code ?? '?'}${result.killed ? ', killed' : ''})`,
+          ),
+        );
+        this.recvLoopRunning = false;
+        return;
+      }
+    }
+  }
+
+  /**
+   * Visible for tests. Dispatch one raw message: parse, look up pending
+   * resolver by id, fire it (or drop on the floor if unmatched).
+   */
+  dispatchMessage(raw: string): void {
+    let parsed: {
+      id?: number;
+      result?: unknown;
+      error?: { message?: string; code?: number };
+    };
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return; // non-JSON line — server should not emit these on stdout
+    }
+    if (typeof parsed.id !== 'number') return; // unsolicited notification
+    const resolver = this.pending.get(parsed.id);
+    if (!resolver) return; // late response; nothing waiting
+    this.pending.delete(parsed.id);
+    if (parsed.error) {
+      resolver.reject(
+        new Error(
+          `${parsed.error.message ?? 'RPC error'} (${parsed.error.code ?? '?'})`,
+        ),
+      );
+    } else {
+      resolver.resolve(parsed.result);
+    }
+  }
+
+  private failAllPending(err: Error): void {
+    for (const r of this.pending.values()) r.reject(err);
+    this.pending.clear();
+  }
+
+  /** Visible for tests — reveal how many requests are still in-flight. */
+  pendingCount(): number {
+    return this.pending.size;
+  }
+
+  async request<T = unknown>(
+    method: string,
+    params: unknown | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<T> {
+    if (this.closed) throw new Error('MCP stdio transport 已关闭');
+    this.startRecvLoop();
+
+    const id = ++this.nextId;
+    const message = JSON.stringify({ jsonrpc: '2.0', id, method, params });
+
+    const promise = new Promise<T>((resolve, reject) => {
+      this.pending.set(id, {
+        resolve: resolve as (v: unknown) => void,
+        reject,
+      });
+      if (signal) {
+        const onAbort = () => {
+          if (this.pending.delete(id)) {
+            reject(new DOMException('Aborted', 'AbortError'));
+          }
+        };
+        if (signal.aborted) {
+          onAbort();
+        } else {
+          signal.addEventListener('abort', onAbort, { once: true });
+        }
+      }
+    });
+
+    try {
+      await this.io.send(message);
+    } catch (e) {
+      this.pending.delete(id);
+      throw new Error(`MCP stdio send 失败: ${(e as Error).message}`);
+    }
+
+    return promise;
+  }
+
+  async notify(method: string, params?: unknown): Promise<void> {
+    if (this.closed) return;
+    const message = JSON.stringify({ jsonrpc: '2.0', method, params });
+    await this.io.send(message).catch(() => {
+      /* notifications are best-effort */
+    });
+  }
+
+  close(): void {
+    this.closed = true;
+    this.failAllPending(new Error('MCP stdio transport 关闭'));
+  }
+}
+
+/** Build a StdioTransport wired to the Tauri host. */
+export function createStdioTransport(sessionId: string): StdioTransport {
+  return new StdioTransport(tauriStdioIO(sessionId));
+}
+
+// ---------------------------------------------------------------------------
+// Protocol layer — initialize / tools/list / tools/call.
+// ---------------------------------------------------------------------------
+
+export class MCPClient {
+  private initialized = false;
+
+  constructor(private readonly transport: MCPTransport) {}
+
+  async initialize() {
+    const result = await this.transport.request<{
+      protocolVersion: string;
+      capabilities: Record<string, unknown>;
+      serverInfo?: { name: string; version: string };
+    }>(
+      'initialize',
+      {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'Flaude', version: '0.1' },
+      },
+      undefined,
+    );
+    await this.transport.notify('notifications/initialized');
+    this.initialized = true;
+    return result;
+  }
+
   async listTools(signal?: AbortSignal): Promise<MCPToolInfo[]> {
     if (!this.initialized) await this.initialize();
-    const result = await this.request<{ tools: MCPToolInfo[] }>(
+    const result = await this.transport.request<{ tools: MCPToolInfo[] }>(
       'tools/list',
       undefined,
-      signal
+      signal,
     );
     return result.tools ?? [];
   }
@@ -185,14 +451,18 @@ export class MCPClient {
   async callTool(
     name: string,
     args: Record<string, unknown>,
-    signal?: AbortSignal
+    signal?: AbortSignal,
   ): Promise<MCPCallResult> {
     if (!this.initialized) await this.initialize();
-    return this.request<MCPCallResult>(
+    return this.transport.request<MCPCallResult>(
       'tools/call',
       { name, arguments: args },
-      signal
+      signal,
     );
+  }
+
+  close(): void {
+    this.transport.close();
   }
 }
 
@@ -210,16 +480,91 @@ function safeName(s: string): string {
   return s.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
 }
 
+/**
+ * Stdio MCP session ids are issued by `mcp_stdio_spawn`. We keep them in a
+ * module-local map keyed by `serverId` so `disconnectMCPServer` can find the
+ * right child to kill, and so the lifecycle helpers below can re-use a
+ * spawned session across reconnects.
+ */
+const stdioSessions = new Map<string, string>();
+
+/** Record a stdio session id against a Flaude serverId. */
+export function rememberStdioSession(serverId: string, sessionId: string): void {
+  stdioSessions.set(serverId, sessionId);
+}
+
+/** Look up the stdio session id for a serverId, or undefined. */
+export function getStdioSession(serverId: string): string | undefined {
+  return stdioSessions.get(serverId);
+}
+
+/** Forget a stdio session — caller must have killed the child first. */
+export function forgetStdioSession(serverId: string): void {
+  stdioSessions.delete(serverId);
+}
+
+/**
+ * Spawn a stdio MCP child via the Tauri host. Caller is responsible for
+ * later calling `mcp_stdio_kill` (via `disconnectMCPServer`) to clean up.
+ *
+ * Throws if not running in Tauri.
+ */
+export async function spawnStdioMCP(args: {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+}): Promise<string> {
+  if (!isTauri()) {
+    throw new Error('stdio MCP 仅在桌面版可用');
+  }
+  const result = await tauriInvoke<{ id: string }>('mcp_stdio_spawn', {
+    args,
+  });
+  return result.id;
+}
+
+/** Kill a previously-spawned stdio MCP. No-op if the id is unknown. */
+export async function killStdioMCP(sessionId: string): Promise<void> {
+  if (!isTauri()) return;
+  await tauriInvoke<void>('mcp_stdio_kill', { id: sessionId }).catch(() => {
+    /* already dead — fine */
+  });
+}
+
+/**
+ * Connect via HTTP. Caller provides URL + optional bearer token; we
+ * register every tool the server reports.
+ */
 export async function connectMCPServer(
   serverId: string,
   url: string,
-  token?: string
+  token?: string,
 ): Promise<ConnectResult> {
-  const client = new MCPClient(url, token);
+  const transport = new HttpTransport(url, token);
+  return connectMCPClient(serverId, new MCPClient(transport));
+}
+
+/**
+ * Connect via stdio. Caller has already spawned (or asked us to remember)
+ * the session via `spawnStdioMCP` + `rememberStdioSession`.
+ */
+export async function connectStdioMCPServer(
+  serverId: string,
+  sessionId: string,
+): Promise<ConnectResult> {
+  const transport = createStdioTransport(sessionId);
+  return connectMCPClient(serverId, new MCPClient(transport));
+}
+
+/** Common path: initialize, list tools, register them. */
+async function connectMCPClient(
+  serverId: string,
+  client: MCPClient,
+): Promise<ConnectResult> {
   const initRes = await client.initialize();
   const tools = await client.listTools();
 
-  // Register each remote tool as a local tool.
   for (const t of tools) {
     const localName = `mcp__${safeName(serverId)}__${safeName(t.name)}`;
     registerTool({

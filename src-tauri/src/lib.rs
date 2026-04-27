@@ -22,6 +22,7 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
 mod bgshell;
+mod mcp_stdio;
 mod office;
 mod pty;
 
@@ -415,6 +416,11 @@ pub fn run() {
         // Separate from PtyState because the two serve very different callers:
         // xterm wants every byte as an event, agent wants to poll on demand.
         .manage(bgshell::BgShellState::default())
+        // Stdio MCP servers — long-lived child processes spawning npm/pip
+        // packages that speak JSON-RPC over stdio. Decoupled from BgShellState
+        // so the agent's `shell_start` cap doesn't compete with marketplace
+        // installs.
+        .manage(mcp_stdio::McpStdioState::default())
         .invoke_handler(tauri::generate_handler![
             fs_list_dir,
             fs_read_file,
@@ -433,6 +439,11 @@ pub fn run() {
             bgshell::shell_kill,
             bgshell::shell_list,
             bgshell::shell_remove,
+            mcp_stdio::mcp_stdio_spawn,
+            mcp_stdio::mcp_stdio_send,
+            mcp_stdio::mcp_stdio_recv,
+            mcp_stdio::mcp_stdio_kill,
+            mcp_stdio::mcp_stdio_list,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Flaude tauri application");

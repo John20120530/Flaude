@@ -18,7 +18,16 @@ import type { Artifact, ArtifactType } from '@/lib/artifacts';
 import { DEFAULT_MODEL_BY_MODE, DEFAULT_PROVIDERS } from '@/config/providers';
 import { BUILTIN_SLASH_COMMANDS } from '@/lib/slashCommands';
 import { BUILTIN_SKILLS } from '@/lib/builtinSkills';
-import { connectMCPServer, disconnectMCPServer } from '@/lib/mcp';
+import {
+  connectMCPServer,
+  connectStdioMCPServer,
+  disconnectMCPServer,
+  forgetStdioSession,
+  getStdioSession,
+  killStdioMCP,
+  rememberStdioSession,
+  spawnStdioMCP,
+} from '@/lib/mcp';
 import { setToolDisabled, setToolDisabledList } from '@/lib/tools';
 import { uid } from '@/lib/utils';
 
@@ -413,9 +422,13 @@ interface AppState {
   // MCP servers
   addMCPServer: (s: Omit<MCPServer, 'id' | 'status'>) => string;
   updateMCPServer: (id: string, patch: Partial<MCPServer>) => void;
-  removeMCPServer: (id: string) => void;
+  removeMCPServer: (id: string) => Promise<void>;
   connectMCPServer: (id: string) => Promise<void>;
-  disconnectMCPServer: (id: string) => void;
+  disconnectMCPServer: (id: string) => Promise<void>;
+  /** Spawn fresh stdio children for every enabled stdio MCP. Tauri-only;
+   *  called once at app launch since stdio session ids don't survive
+   *  process restarts. */
+  restartStdioMCPs: () => Promise<void>;
 
   // Slash commands
   addSlashCommand: (c: Omit<SlashCommand, 'id'>) => string;
@@ -1055,7 +1068,17 @@ export const useAppStore = create<AppState>()(
         set({ activeArtifactId: id, artifactsOpen: id !== null }),
 
       // MCP servers
-      addMCPServer: ({ name, url, token, enabled }) => {
+      //
+      // Two transports today:
+      //   - HTTP (`transport === 'http'` or undefined for legacy entries):
+      //     just persist URL + optional token; connect = `connectMCPServer`
+      //     in lib/mcp.ts which fetch()es.
+      //   - Stdio (`transport === 'stdio'`): connect = spawn the child via
+      //     `mcp_stdio_spawn`, then run the JSON-RPC handshake over the
+      //     stdio session. The session id is in-memory only (lib/mcp.ts's
+      //     `stdioSessions` map) — it doesn't survive an app restart, which
+      //     is why `restartStdioMCPs` exists.
+      addMCPServer: ({ name, transport, url, token, stdioConfig, enabled }) => {
         const id = uid('mcp');
         set((s) => ({
           mcpServers: [
@@ -1063,8 +1086,10 @@ export const useAppStore = create<AppState>()(
             {
               id,
               name,
+              transport,
               url,
               token,
+              stdioConfig,
               enabled: enabled ?? true,
               status: 'disconnected',
             },
@@ -1078,8 +1103,11 @@ export const useAppStore = create<AppState>()(
             m.id === id ? { ...m, ...patch } : m
           ),
         })),
-      removeMCPServer: (id) => {
-        disconnectMCPServer(id);
+      removeMCPServer: async (id) => {
+        // Tear down the MCP toolset *and* (for stdio) kill the child before
+        // dropping the entry. Doing it in this order means the next render
+        // won't see a "ghost" entry whose tools are still registered.
+        await get().disconnectMCPServer(id);
         set((s) => ({ mcpServers: s.mcpServers.filter((m) => m.id !== id) }));
       },
       connectMCPServer: async (id) => {
@@ -1093,7 +1121,29 @@ export const useAppStore = create<AppState>()(
           ),
         }));
         try {
-          const { tools } = await connectMCPServer(id, server.url, server.token);
+          let tools;
+          if (server.transport === 'stdio') {
+            if (!server.stdioConfig) {
+              throw new Error('stdio MCP 缺少 stdioConfig');
+            }
+            // Re-spawn if no live session id remembered yet (typical after
+            // a fresh launch). If one exists from a previous connect attempt
+            // in this process we re-use it — `mcp_stdio_recv` will tell us
+            // if the child is dead and we'll fall through to the catch.
+            let sessionId = getStdioSession(id);
+            if (!sessionId) {
+              sessionId = await spawnStdioMCP({
+                command: server.stdioConfig.command,
+                args: server.stdioConfig.args,
+                env: server.stdioConfig.env,
+                cwd: server.stdioConfig.cwd,
+              });
+              rememberStdioSession(id, sessionId);
+            }
+            ({ tools } = await connectStdioMCPServer(id, sessionId));
+          } else {
+            ({ tools } = await connectMCPServer(id, server.url, server.token));
+          }
           set((s) => ({
             mcpServers: s.mcpServers.map((m) =>
               m.id === id
@@ -1106,6 +1156,15 @@ export const useAppStore = create<AppState>()(
             ),
           }));
         } catch (e) {
+          // If we spawned a child but the handshake failed, kill it so we
+          // don't leak a half-initialised process slot.
+          if (server.transport === 'stdio') {
+            const session = getStdioSession(id);
+            if (session) {
+              await killStdioMCP(session);
+              forgetStdioSession(id);
+            }
+          }
           set((s) => ({
             mcpServers: s.mcpServers.map((m) =>
               m.id === id
@@ -1120,8 +1179,18 @@ export const useAppStore = create<AppState>()(
           throw e;
         }
       },
-      disconnectMCPServer: (id) => {
+      disconnectMCPServer: async (id) => {
+        const server = get().mcpServers.find((m) => m.id === id);
+        // Always unregister the tool set even if the entry is gone — defence
+        // in depth against stale registrations after a botched remove flow.
         disconnectMCPServer(id);
+        if (server?.transport === 'stdio') {
+          const session = getStdioSession(id);
+          if (session) {
+            await killStdioMCP(session);
+            forgetStdioSession(id);
+          }
+        }
         set((s) => ({
           mcpServers: s.mcpServers.map((m) =>
             m.id === id
@@ -1129,6 +1198,21 @@ export const useAppStore = create<AppState>()(
               : m
           ),
         }));
+      },
+      restartStdioMCPs: async () => {
+        // Walk every persisted stdio MCP that's enabled. Spawn a fresh
+        // child + reconnect. Errors are swallowed onto the per-server
+        // `status='error'` flag so one broken MCP doesn't block the others.
+        const servers = get().mcpServers.filter(
+          (m) => m.transport === 'stdio' && m.enabled,
+        );
+        for (const s of servers) {
+          try {
+            await get().connectMCPServer(s.id);
+          } catch {
+            /* per-server error is already on s.lastError */
+          }
+        }
       },
 
       // Slash commands
@@ -1879,6 +1963,26 @@ export const useAppStore = create<AppState>()(
         // Defensive: pre-v0.1.30 persisted state has no codeBottomPanelHeight.
         if (typeof state.codeBottomPanelHeight !== 'number') {
           state.codeBottomPanelHeight = 180;
+        }
+        // Stdio MCP statuses don't survive a process restart: the child
+        // got reaped when the app exited, the in-memory `stdioSessions`
+        // map is empty on launch, but persisted state still says
+        // `status: 'connected'`. Reset every stdio entry to 'disconnected'
+        // so the UI reflects reality until `restartStdioMCPs` re-spawns
+        // them. (HTTP entries can stay as-is — they have no per-process
+        // state, just URL + token.) Also clears stale `toolNames` so the
+        // tool registry doesn't claim tools that aren't registered yet.
+        if (Array.isArray(state.mcpServers)) {
+          state.mcpServers = state.mcpServers.map((m) =>
+            m.transport === 'stdio'
+              ? {
+                  ...m,
+                  status: 'disconnected' as const,
+                  toolNames: undefined,
+                  lastError: undefined,
+                }
+              : m,
+          );
         }
         // Idle auto-logout: if the user's been gone longer than the
         // timeout, scrub their auth on rehydrate so they hit the login

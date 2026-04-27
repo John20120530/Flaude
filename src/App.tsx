@@ -10,6 +10,7 @@ import ProjectsView from '@/views/ProjectsView';
 import LoginView from '@/views/LoginView';
 import AdminView from '@/views/AdminView';
 import { startSync } from '@/lib/sync';
+import { isTauri } from '@/lib/tauri';
 
 export default function App() {
   const theme = useAppStore((s) => s.theme);
@@ -44,6 +45,24 @@ export default function App() {
   useEffect(() => {
     if (!auth) return;
     void startSync();
+  }, [auth?.user.id]);
+
+  // Re-spawn every persisted stdio MCP server's child process. Stdio MCP
+  // session ids don't survive a process restart (the OS reaps the child
+  // with the app), so on every fresh launch we walk the persisted
+  // mcpServers list and spawn fresh children for each enabled stdio entry.
+  // Tauri-only — on the web build there's no Rust side to spawn anything,
+  // and stdio MCPs in storage there shouldn't exist (the install button is
+  // gated behind isTauri()).
+  //
+  // Fires on every login transition (not just first mount) because
+  // `restartStdioMCPs` is idempotent — already-connected servers get
+  // reused via the `stdioSessions` map in lib/mcp.ts. Also harmless when
+  // there are zero stdio servers.
+  useEffect(() => {
+    if (!auth) return;
+    if (!isTauri()) return;
+    void useAppStore.getState().restartStdioMCPs();
   }, [auth?.user.id]);
 
   // Idle-timeout heartbeat. Refreshes `lastActiveAt` while the user is
