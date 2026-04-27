@@ -6,7 +6,7 @@
  * diff (a pure function).
  */
 import { describe, expect, it } from 'vitest';
-import { diffNewlyCompleted, snapshotOf } from './useBackgroundTasks';
+import { diffNewlyCompleted, snapshotOf, updateObservedEndedMs } from './useBackgroundTasks';
 import type { BgShellInfo } from '@/lib/tauri';
 
 const task = (over: Partial<BgShellInfo> = {}): BgShellInfo => ({
@@ -119,5 +119,76 @@ describe('diffNewlyCompleted', () => {
     const snap2 = snapshotOf(after2);
     const diff3 = diffNewlyCompleted(snap2, after2);
     expect(diff3).toEqual([]);
+  });
+});
+
+describe('updateObservedEndedMs', () => {
+  it('records `now` for tasks that just transitioned running→done', () => {
+    const prevSnap = new Map<string, boolean>([['a', true], ['b', true]]);
+    const prevEnded = new Map<string, number>();
+    const latest = [
+      task({ id: 'a', running: false, code: 0 }),
+      task({ id: 'b', running: true }),
+    ];
+    const out = updateObservedEndedMs(prevSnap, prevEnded, latest, 9999);
+    expect(out.get('a')).toBe(9999);
+    expect(out.has('b')).toBe(false); // still running
+  });
+
+  it('preserves an already-recorded endedMs across subsequent polls', () => {
+    const prevSnap = new Map<string, boolean>([['a', false]]);
+    const prevEnded = new Map<string, number>([['a', 1000]]);
+    const latest = [task({ id: 'a', running: false, code: 0 })];
+    const out = updateObservedEndedMs(prevSnap, prevEnded, latest, 9999);
+    expect(out.get('a')).toBe(1000); // not 9999 — keep the original observation
+  });
+
+  it('does NOT record endedMs for a task we never saw running (already-done at first poll)', () => {
+    const prevSnap = new Map<string, boolean>(); // empty — first poll
+    const prevEnded = new Map<string, number>();
+    const latest = [task({ id: 'a', running: false, code: 0 })];
+    const out = updateObservedEndedMs(prevSnap, prevEnded, latest, 9999);
+    // We genuinely don't know when it finished — better to show "完成" with
+    // no duration than to lie with `now`.
+    expect(out.has('a')).toBe(false);
+  });
+
+  it('drops entries for tasks the panel forgot about (id removed from registry)', () => {
+    const prevSnap = new Map<string, boolean>([['a', false], ['b', true]]);
+    const prevEnded = new Map<string, number>([['a', 1000]]);
+    // Latest only has 'b' — 'a' was shellRemove'd.
+    const latest = [task({ id: 'b', running: true })];
+    const out = updateObservedEndedMs(prevSnap, prevEnded, latest, 9999);
+    expect(out.has('a')).toBe(false);
+  });
+
+  it('handles concurrent finishers with the same `now`', () => {
+    const prevSnap = new Map<string, boolean>([['a', true], ['b', true]]);
+    const prevEnded = new Map<string, number>();
+    const latest = [
+      task({ id: 'a', running: false, code: 0 }),
+      task({ id: 'b', running: false, code: 1 }),
+    ];
+    const out = updateObservedEndedMs(prevSnap, prevEnded, latest, 5555);
+    expect(out.get('a')).toBe(5555);
+    expect(out.get('b')).toBe(5555);
+  });
+
+  it('round-trips with snapshotOf — second poll on still-finished task preserves end time', () => {
+    // First poll: a is running.
+    const after1 = [task({ id: 'a', running: true })];
+    const snap1 = snapshotOf(after1);
+    const ended1 = updateObservedEndedMs(new Map(), new Map(), after1, 1000);
+    expect(ended1.has('a')).toBe(false);
+
+    // Second poll: a finished.
+    const after2 = [task({ id: 'a', running: false, code: 0 })];
+    const ended2 = updateObservedEndedMs(snap1, ended1, after2, 2000);
+    expect(ended2.get('a')).toBe(2000);
+
+    // Third poll: a still finished. Should keep 2000, not advance.
+    const snap2 = snapshotOf(after2);
+    const ended3 = updateObservedEndedMs(snap2, ended2, after2, 3000);
+    expect(ended3.get('a')).toBe(2000);
   });
 });

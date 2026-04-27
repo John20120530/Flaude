@@ -20,6 +20,26 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { isTauri, shellList, shellRemove, shellKill, type BgShellInfo } from '@/lib/tauri';
 
 /**
+ * BgShellInfo enriched with a client-observed end timestamp. The bgshell
+ * Rust side doesn't track when a process actually exited (only `running`
+ * flips and `code` materializes), so the panel was forced to say
+ * "运行了 N 秒" using `Date.now() - startedMs` — which kept growing
+ * forever after the task finished. We approximate `endedMs` by
+ * remembering the wall clock the FIRST time we saw `running: false` for
+ * each id. Off by up to one polling interval (2 s default), good enough
+ * for "completed N秒 ago" badges.
+ *
+ * `endedMs` is undefined when:
+ *   - The task is still running.
+ *   - The task was already finished the first time we polled it (we
+ *     never witnessed the transition, so we genuinely don't know when
+ *     it stopped — show "完成" with no duration rather than lie).
+ */
+export interface ObservedTask extends BgShellInfo {
+  endedMs?: number;
+}
+
+/**
  * Pure helper: given the previous (id → running) snapshot and the latest
  * task list, return the subset of tasks that just transitioned from
  * running=true to running=false. Extracted so it can be unit-tested
@@ -51,6 +71,32 @@ export function snapshotOf(tasks: BgShellInfo[]): Map<string, boolean> {
   return out;
 }
 
+/**
+ * Pure helper: maintain the observed end-time map across polls.
+ * - When a task transitions running→false (or appears already-done with a
+ *   prev-running snapshot entry), record `now` as its end time.
+ * - Tasks the panel forgets about (id no longer in `latest`) drop from
+ *   the map so we don't leak entries on long-running sessions.
+ */
+export function updateObservedEndedMs(
+  prevSnapshot: Map<string, boolean>,
+  prevEnded: Map<string, number>,
+  latest: BgShellInfo[],
+  now: number,
+): Map<string, number> {
+  const next = new Map<string, number>();
+  for (const t of latest) {
+    if (prevEnded.has(t.id)) {
+      next.set(t.id, prevEnded.get(t.id)!);
+      continue;
+    }
+    if (!t.running && prevSnapshot.get(t.id) === true) {
+      next.set(t.id, now);
+    }
+  }
+  return next;
+}
+
 export interface UseBackgroundTasksOptions {
   /**
    * When false, polling pauses. Used to suspend updates when the panel
@@ -63,7 +109,8 @@ export interface UseBackgroundTasksOptions {
 }
 
 export interface UseBackgroundTasksReturn {
-  tasks: BgShellInfo[];
+  /** Tasks enriched with our client-observed `endedMs` for finished items. */
+  tasks: ObservedTask[];
   /** Subset of `tasks` that flipped from running → done in the latest poll. */
   newlyCompleted: BgShellInfo[];
   /** Manual refresh; bypasses the interval. */
@@ -84,7 +131,7 @@ export function useBackgroundTasks({
   active,
   intervalMs = 2000,
 }: UseBackgroundTasksOptions): UseBackgroundTasksReturn {
-  const [tasks, setTasks] = useState<BgShellInfo[]>([]);
+  const [tasks, setTasks] = useState<ObservedTask[]>([]);
   const [newlyCompleted, setNewlyCompleted] = useState<BgShellInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -93,6 +140,8 @@ export function useBackgroundTasks({
   // (not state) because we read it inside the polling closure and don't
   // want every poll to schedule a re-render just to swap this.
   const prevSnapshotRef = useRef<Map<string, boolean>>(new Map());
+  // Observed end times for finished tasks. See ObservedTask docstring.
+  const endedMsRef = useRef<Map<string, number>>(new Map());
 
   const poll = useCallback(async () => {
     if (!isTauri()) {
@@ -104,7 +153,6 @@ export function useBackgroundTasks({
     }
     try {
       const list = await shellList();
-      setTasks(list);
       setError(null);
 
       // Diff: anything we previously knew as running that's now `running:
@@ -114,9 +162,23 @@ export function useBackgroundTasks({
       if (justFinished.length > 0) {
         setNewlyCompleted((cur) => [...cur, ...justFinished]);
       }
+      // Update observed-end map BEFORE swapping the snapshot reference,
+      // so the helper can compare against the previous poll's view.
+      endedMsRef.current = updateObservedEndedMs(
+        prevSnapshotRef.current,
+        endedMsRef.current,
+        list,
+        Date.now(),
+      );
       // Update snapshot AFTER the diff so we compare against the prior
       // poll's view, not against ourselves.
       prevSnapshotRef.current = snapshotOf(list);
+      // Enrich tasks with the observed endedMs before handing to consumers.
+      const enriched: ObservedTask[] = list.map((t) => {
+        const endedMs = endedMsRef.current.get(t.id);
+        return endedMs !== undefined ? { ...t, endedMs } : t;
+      });
+      setTasks(enriched);
     } catch (e) {
       setError((e as Error).message ?? 'failed to list bg shells');
     } finally {
