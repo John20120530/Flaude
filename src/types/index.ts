@@ -59,6 +59,13 @@ export interface Conversation {
   messages: Message[];
   createdAt: number;
   updatedAt: number;
+  /**
+   * If this conversation was created by `spawn_subtask` from another
+   * conversation, the parent's id. Used to render a hierarchy hint in
+   * the sidebar and to scope analytics. Top-level conversations leave
+   * this unset.
+   */
+  parentConversationId?: string;
   /** Pinned conversations appear at top of sidebar. */
   pinned?: boolean;
   /** Starred shows in a separate section. */

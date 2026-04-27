@@ -284,6 +284,23 @@ interface AppState {
   setActiveMode: (m: WorkMode) => void;
 
   newConversation: (mode?: WorkMode, projectId?: string) => string;
+  /**
+   * Create a child conversation spawned from a parent (typically the
+   * `spawn_subtask` tool). Differs from newConversation in three ways:
+   *   - Sets `parentConversationId` so we can later render hierarchy
+   *   - Does NOT touch activeConversationId — subagents run silently
+   *     in the background; yanking the user's view away mid-typing
+   *     would be hostile
+   *   - Title is provided by the caller (the subagent's task label),
+   *     not the placeholder "新对话"
+   */
+  newSubtaskConversation: (args: {
+    parentConversationId: string;
+    title: string;
+    mode: WorkMode;
+    modelId: string;
+    projectId?: string;
+  }) => string;
   setActiveConversation: (id: string | null) => void;
   deleteConversation: (id: string) => void;
   /** Drop all messages but keep the conversation shell. Used by `/clear`. */
@@ -536,6 +553,30 @@ export const useAppStore = create<AppState>()(
           conversations: [conv, ...s.conversations],
           activeConversationId: id,
           activeMode,
+        }));
+        return id;
+      },
+
+      newSubtaskConversation: (args) => {
+        const id = uid('conv');
+        const now = Date.now();
+        const conv: Conversation = {
+          id,
+          title: args.title,
+          mode: args.mode,
+          modelId: args.modelId,
+          projectId: args.projectId ?? undefined,
+          parentConversationId: args.parentConversationId,
+          messages: [],
+          createdAt: now,
+          updatedAt: now,
+        };
+        set((s) => ({
+          conversations: [conv, ...s.conversations],
+          // Intentionally NOT setting activeConversationId — subagents
+          // run in the background; yanking the user's view would be
+          // hostile. They can click into the subtask in the sidebar
+          // when they want to watch.
         }));
         return id;
       },
