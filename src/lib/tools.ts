@@ -45,6 +45,27 @@ export interface ToolContext {
    * UI tree. Injected by useStreamedChat from src/lib/planMode.ts.
    */
   requestPlanApproval?: (plan: string) => Promise<PlanApprovalResultLite>;
+  /**
+   * Hook for `spawn_subtask`. Runs a fresh Code-mode conversation to
+   * completion and returns its final assistant text. Injected by
+   * useStreamedChat from src/lib/subagent.ts so tools.ts doesn't depend
+   * on the store directly. Lite shape mirrors SubagentRequest /
+   * SubagentResult for the same cycle-avoidance reason as
+   * PlanApprovalResultLite below.
+   */
+  spawnSubtask?: (req: SubagentRequestLite) => Promise<SubagentResultLite>;
+}
+
+export interface SubagentRequestLite {
+  title: string;
+  prompt: string;
+  context?: string;
+}
+
+export interface SubagentResultLite {
+  finalText: string;
+  subConversationId: string;
+  truncated: boolean;
 }
 
 /**
@@ -618,6 +639,77 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
         '❌ 用户拒绝了这份计划' +
         (result.reason ? `：${result.reason}` : '。') +
         '\n请在不调用副作用工具的前提下，根据用户接下来的输入继续。'
+      );
+    },
+  },
+
+  // ----- spawn_subtask ---------------------------------------------------
+  // Delegate a focused chunk of work to a fresh Code-mode subagent. The
+  // subagent runs to completion in its own conversation and returns ONLY
+  // its final text — the parent doesn't see the subagent's tool calls,
+  // tool results, or intermediate prose. The whole point is token
+  // efficiency: a 30-tool-call investigation collapses into one summary.
+  //
+  // Mode: `code` only. Subagents share the parent's workspace, model,
+  // skills, and globalMemory. They cannot spawn their own subagents (we
+  // strip spawn_subtask from the subagent's toolset to prevent fork
+  // bombs in v1).
+  {
+    name: 'spawn_subtask',
+    description:
+      '把一段独立的、产出可总结的工作外包给一个子 agent。子 agent 在隔离的对话里跑工具循环（最多 15 轮），结束时返回一段总结给你。' +
+      '\n\n**适合用**：搜索/调研类（"找出所有 fetch 调用"）、独立验证（"跑测试看是否还有 fail"）、批量小修复（"把 src/ 里的 console.log 都加 TODO 注释"）。' +
+      '\n**不适合用**：单工具就能干完的事（直接调工具）、需要持续与用户沟通的任务（让父对话处理）、与父对话强耦合需要看上下文的任务（你直接做）。' +
+      '\n\n子 agent 不会看到你的对话历史，只看到 prompt 和你传的 context。子 agent 不能再开子 agent。',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: {
+          type: 'string',
+          description:
+            '子任务的简短标题（10-30 字），会显示在用户的 sidebar 里。例如「找所有 fetch 调用」「重新跑一遍测试」。',
+        },
+        prompt: {
+          type: 'string',
+          description:
+            '给子 agent 的完整任务说明。要自包含——子 agent 看不到父对话的任何历史。说清楚：要做什么 / 范围（哪些目录） / 返回什么格式（列表？摘要？文件清单？）。',
+        },
+        context: {
+          type: 'string',
+          description:
+            '可选。从父对话往下传的上下文片段（项目用什么语言、用户的偏好、已经知道的事实等）。保持简短——会拼到子 agent 的第一条消息里，等于子 agent 每次思考都要带着它。',
+        },
+      },
+      required: ['title', 'prompt'],
+    },
+    source: 'builtin',
+    modes: ['code'],
+    handler: async ({ title, prompt, context }, { spawnSubtask }) => {
+      if (!spawnSubtask) {
+        throw new Error(
+          'spawn_subtask 在当前上下文不可用（缺少 spawnSubtask 钩子）。',
+        );
+      }
+      if (typeof prompt !== 'string' || !prompt.trim()) {
+        throw new Error('prompt 必须是非空字符串。');
+      }
+      const safeTitle = typeof title === 'string' && title.trim() ? title.trim() : '子任务';
+      const safeContext =
+        typeof context === 'string' && context.trim() ? context.trim() : undefined;
+      const result = await spawnSubtask({
+        title: safeTitle,
+        prompt,
+        context: safeContext,
+      });
+      // Hand back the subagent's final text plus a sidebar pointer so the
+      // parent's model can mention "see subtask #abc123" if helpful.
+      const truncationNote = result.truncated
+        ? '\n\n[注意：子任务达到 15 轮工具上限，没有自然结束。上面是它最后一段文字。]'
+        : '';
+      return (
+        `🌿 子任务「${safeTitle}」完成（id=${result.subConversationId.slice(-6)}）：\n\n` +
+        result.finalText +
+        truncationNote
       );
     },
   },

@@ -15,6 +15,7 @@ import {
   isDestructiveToolName,
 } from '@/lib/planModeRuntime';
 import { requestPlanApproval } from '@/lib/planMode';
+import { runSubagent } from '@/lib/subagent';
 import {
   formatHookOutputForAgent,
   matchTool,
@@ -497,6 +498,17 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
               // 'feedback' / 'rejected' keep the gate engaged — the model
               // either revises and re-submits, or stops touching anything.
               return result;
+            },
+            spawnSubtask: async (req) => {
+              // Bake the parent's conversation id in here — the tool
+              // handler in tools.ts is conversation-agnostic, but the
+              // runtime needs to know whose subagent this is.
+              return runSubagent({
+                parentConversationId: conversation.id,
+                title: req.title,
+                prompt: req.prompt,
+                context: req.context,
+              });
             },
           });
           tc.status = 'success';
