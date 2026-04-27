@@ -143,14 +143,18 @@ describe('updateObservedEndedMs', () => {
     expect(out.get('a')).toBe(1000); // not 9999 — keep the original observation
   });
 
-  it('does NOT record endedMs for a task we never saw running (already-done at first poll)', () => {
+  it('records endedMs for a first-time-seen finished task (sub-second commands that completed within one polling interval)', () => {
+    // Common case: agent calls shell_start("node -e 'console.log(\"hi\"); process.exit(2)'"),
+    // task finishes in milliseconds, our first poll sees it already done.
+    // Since bgshell is in-memory only (no app-restart persistence), we can
+    // safely treat `now` as approximate end time — off by at most one poll
+    // interval, which formatDuration renders as "<1 秒" anyway for these
+    // fast tasks.
     const prevSnap = new Map<string, boolean>(); // empty — first poll
     const prevEnded = new Map<string, number>();
     const latest = [task({ id: 'a', running: false, code: 0 })];
     const out = updateObservedEndedMs(prevSnap, prevEnded, latest, 9999);
-    // We genuinely don't know when it finished — better to show "完成" with
-    // no duration than to lie with `now`.
-    expect(out.has('a')).toBe(false);
+    expect(out.get('a')).toBe(9999);
   });
 
   it('drops entries for tasks the panel forgot about (id removed from registry)', () => {

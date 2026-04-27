@@ -73,10 +73,27 @@ export function snapshotOf(tasks: BgShellInfo[]): Map<string, boolean> {
 
 /**
  * Pure helper: maintain the observed end-time map across polls.
- * - When a task transitions running→false (or appears already-done with a
- *   prev-running snapshot entry), record `now` as its end time.
- * - Tasks the panel forgets about (id no longer in `latest`) drop from
- *   the map so we don't leak entries on long-running sessions.
+ *
+ * Records `now` for any task currently observed as finished (running:
+ * false) that we haven't yet recorded. This captures both:
+ *
+ *   - **Witnessed transitions** — task was running last poll, now isn't.
+ *   - **First-time-finished** — task we've never seen, currently done.
+ *     Common for sub-second commands (`node -e 'console.log(...);
+ *     process.exit(2)'`) that complete within a single polling interval.
+ *
+ * Why both cases use `now` as the end time even though we don't witness
+ * the transition for first-time-finished: bgshell is in-memory only, so
+ * the registry doesn't persist across app restarts. Every task we see
+ * was started in this session, and the panel typically opens within
+ * seconds of `shell_start` — so `now` is close enough to the real exit
+ * time for "completed N seconds" labels (off by at most one polling
+ * interval, ~2 s default). The diff used for the badge counter
+ * (`diffNewlyCompleted`) still requires a witnessed transition, so
+ * first-time-finished tasks don't spam the badge.
+ *
+ * Tasks the panel forgets about (id no longer in `latest`) drop from
+ * the map so we don't leak entries on long-running sessions.
  */
 export function updateObservedEndedMs(
   prevSnapshot: Map<string, boolean>,
@@ -84,13 +101,19 @@ export function updateObservedEndedMs(
   latest: BgShellInfo[],
   now: number,
 ): Map<string, number> {
+  // Silence the unused-arg warning while keeping the signature stable —
+  // earlier versions of this helper used prevSnapshot to gate whether to
+  // record. We dropped that gate but the parameter is still part of the
+  // public test surface.
+  void prevSnapshot;
   const next = new Map<string, number>();
   for (const t of latest) {
-    if (prevEnded.has(t.id)) {
-      next.set(t.id, prevEnded.get(t.id)!);
+    const existing = prevEnded.get(t.id);
+    if (existing !== undefined) {
+      next.set(t.id, existing);
       continue;
     }
-    if (!t.running && prevSnapshot.get(t.id) === true) {
+    if (!t.running) {
       next.set(t.id, now);
     }
   }
