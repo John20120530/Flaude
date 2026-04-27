@@ -1527,6 +1527,16 @@ function MCPRow({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <div className="font-medium truncate">{server.name}</div>
+            <span
+              className={cn(
+                'text-[10px] px-1.5 py-0.5 rounded',
+                server.transport === 'stdio'
+                  ? 'bg-amber-500/10 text-amber-700 dark:text-amber-400'
+                  : 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400',
+              )}
+            >
+              {server.transport === 'stdio' ? 'stdio' : 'HTTP'}
+            </span>
             <div className={cn('flex items-center gap-1 text-xs', statusColor)}>
               <StatusIcon
                 className={cn(
@@ -1537,8 +1547,17 @@ function MCPRow({
               {server.status}
             </div>
           </div>
-          <div className="text-xs font-mono text-claude-muted dark:text-night-muted truncate">
-            {server.url}
+          <div
+            className="text-xs font-mono text-claude-muted dark:text-night-muted truncate"
+            title={
+              server.transport === 'stdio' && server.stdioConfig
+                ? `${server.stdioConfig.command} ${server.stdioConfig.args.join(' ')}`
+                : server.url
+            }
+          >
+            {server.transport === 'stdio' && server.stdioConfig
+              ? `$ ${server.stdioConfig.command} ${server.stdioConfig.args.join(' ')}`
+              : server.url}
           </div>
         </div>
         <label className="text-xs flex items-center gap-1.5 cursor-pointer">
@@ -2456,8 +2475,26 @@ async function installMarketSkill(
 function McpMarketSection() {
   const mcpServers = useAppStore((s) => s.mcpServers);
   const addMCPServer = useAppStore((s) => s.addMCPServer);
-  const installedUrls = useMemo(
-    () => new Set(mcpServers.map((m) => m.url)),
+  const connectMCPServer = useAppStore((s) => s.connectMCPServer);
+  const isOnTauri = isTauri();
+
+  // "Already installed" detection for both transports:
+  //   - HTTP: exact URL match
+  //   - Stdio: marketplace id stored in `name` (we set name = entry.title)
+  //     plus transport === 'stdio'. Best-effort, same trade-off as Skills
+  //     market: a renamed install won't be recognized as "already
+  //     installed" but no harm done.
+  const installedHttpUrls = useMemo(
+    () => new Set(mcpServers.filter((m) => m.transport !== 'stdio').map((m) => m.url)),
+    [mcpServers],
+  );
+  const installedStdioTitles = useMemo(
+    () =>
+      new Set(
+        mcpServers
+          .filter((m) => m.transport === 'stdio')
+          .map((m) => m.name),
+      ),
     [mcpServers],
   );
 
@@ -2468,34 +2505,88 @@ function McpMarketSection() {
         MCP 市场
       </h2>
       <p className="text-sm text-claude-muted dark:text-night-muted mb-3">
-        外部 MCP 服务器精选。带 HTTP endpoint 的可以一键安装；本地 stdio MCP 显示安装命令让你自己跑（Flaude 只支持 HTTP/SSE，stdio 要先用
-        <code className="text-[11px] mx-1 px-1 rounded bg-black/[0.05] dark:bg-white/[0.07]">mcp-proxy</code>
-        包成 HTTP）。来源 + license 每条都标注。
+        外部 MCP 服务器精选。HTTP endpoint 浏览器 / 桌面都能一键装；stdio MCP{' '}
+        {isOnTauri ? (
+          <>桌面版自动 spawn 子进程（需要系统装了 Node.js）。</>
+        ) : (
+          <>仅在桌面版可一键，网页版只能看安装命令。</>
+        )}
+        来源 + license 每条都标注。
       </p>
       <div className="space-y-2">
-        {MCP_MARKET.map((entry) => (
-          <McpMarketRow
-            key={entry.id}
-            entry={entry}
-            installed={
-              entry.endpointType === 'http' &&
-              entry.endpointUrl !== undefined &&
-              installedUrls.has(entry.endpointUrl)
-            }
-            onInstall={(token) => {
-              if (entry.endpointType !== 'http' || !entry.endpointUrl) {
-                alert('这是 stdio MCP，请先按上面的命令本地启动后用 mcp-proxy 暴露成 HTTP，然后到上面的「MCP 服务器」section 手动添加。');
-                return;
-              }
-              addMCPServer({
-                name: entry.title,
-                url: entry.endpointUrl,
-                token: token || undefined,
-                enabled: true,
-              });
-            }}
-          />
-        ))}
+        {MCP_MARKET.map((entry) => {
+          const httpInstalled =
+            entry.endpointType === 'http' &&
+            entry.endpointUrl !== undefined &&
+            installedHttpUrls.has(entry.endpointUrl);
+          const stdioInstalled =
+            entry.endpointType === 'stdio-instructions' &&
+            installedStdioTitles.has(entry.title);
+          return (
+            <McpMarketRow
+              key={entry.id}
+              entry={entry}
+              installed={httpInstalled || stdioInstalled}
+              onInstall={async (token) => {
+                // Path 1: HTTP — same as before.
+                if (entry.endpointType === 'http' && entry.endpointUrl) {
+                  addMCPServer({
+                    name: entry.title,
+                    transport: 'http',
+                    url: entry.endpointUrl,
+                    token: token || undefined,
+                    enabled: true,
+                  });
+                  return;
+                }
+                // Path 2: stdio + Tauri + structured spawn config — one-click.
+                if (
+                  entry.endpointType === 'stdio-instructions' &&
+                  entry.stdioCommand &&
+                  isOnTauri
+                ) {
+                  // If the entry declares envKeys (e.g. GITHUB token), the
+                  // user-pasted token becomes the env value. We take the
+                  // FIRST envKey only — multi-env entries aren't a thing in
+                  // the current manifest, and adding a multi-input form is
+                  // a v2 polish item.
+                  const env: Record<string, string> = {};
+                  const keys = entry.stdioCommand.envKeys ?? [];
+                  if (keys.length > 0 && token) {
+                    env[keys[0]!] = token;
+                  }
+                  const id = addMCPServer({
+                    name: entry.title,
+                    transport: 'stdio',
+                    url: '', // unused for stdio; kept for `installedUrls` shape
+                    stdioConfig: {
+                      command: entry.stdioCommand.command,
+                      args: entry.stdioCommand.args,
+                      env: Object.keys(env).length > 0 ? env : undefined,
+                    },
+                    enabled: true,
+                  });
+                  // Auto-connect (= spawn child + run handshake) so the
+                  // user sees tools in the list immediately. Errors
+                  // surface on the row's `lastError` via the regular
+                  // store path; we just swallow here.
+                  try {
+                    await connectMCPServer(id);
+                  } catch {
+                    /* error already on store entry */
+                  }
+                  return;
+                }
+                // Path 3: stdio without spawn config OR running on web.
+                alert(
+                  isOnTauri
+                    ? '这条 stdio MCP 需要额外参数（如 DB 连接串），暂不支持一键安装。请按上面的命令本地启动后到「MCP 服务器」section 手动添加。'
+                    : '网页版不能 spawn 本地进程。请下载桌面版 Flaude，或按上面的命令本地启动 + 用 mcp-proxy 包成 HTTP。',
+                );
+              }}
+            />
+          );
+        })}
       </div>
     </section>
   );
@@ -2513,8 +2604,20 @@ function McpMarketRow({
   const [expanded, setExpanded] = useState(false);
   const [token, setToken] = useState('');
   const [copied, setCopied] = useState(false);
+  const [installing, setInstalling] = useState(false);
 
   const isStdio = entry.endpointType === 'stdio-instructions';
+  // Can the install button do real work? HTTP always; stdio only when we
+  // have structured spawn config AND we're running on the desktop.
+  const canOneClick =
+    entry.endpointType === 'http'
+      ? entry.endpointUrl !== undefined
+      : Boolean(entry.stdioCommand) && isTauri();
+  const needsTokenInput =
+    (entry.endpointType === 'http' && entry.authType === 'bearer') ||
+    (canOneClick &&
+      isStdio &&
+      (entry.stdioCommand?.envKeys?.length ?? 0) > 0);
 
   const copyCommand = async () => {
     if (!entry.installInstructions) return;
@@ -2594,15 +2697,27 @@ function McpMarketRow({
             {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
             详情
           </button>
-          {!isStdio && (
+          {canOneClick && (
             <button
               type="button"
-              disabled={installed}
-              onClick={() => onInstall(token)}
+              disabled={installed || installing}
+              onClick={async () => {
+                setInstalling(true);
+                try {
+                  await onInstall(token);
+                } finally {
+                  setInstalling(false);
+                }
+              }}
               className="btn-primary text-xs disabled:opacity-50"
+              title={
+                isStdio
+                  ? '需要系统装了 Node.js（npx 在 PATH 里）'
+                  : undefined
+              }
             >
               <Download className="w-3.5 h-3.5" />
-              {installed ? '已装' : '安装'}
+              {installed ? '已装' : installing ? '安装中…' : '安装'}
             </button>
           )}
         </div>
@@ -2612,8 +2727,19 @@ function McpMarketRow({
         <div className="border-t border-claude-border/50 dark:border-night-border/50 pt-2 space-y-2">
           {isStdio ? (
             <>
+              {entry.stdioCommand && (
+                <div className="text-[11px] text-claude-muted dark:text-night-muted">
+                  桌面一键安装会执行：
+                  <code className="ml-1 font-mono break-all">
+                    {entry.stdioCommand.command}{' '}
+                    {entry.stdioCommand.args.join(' ')}
+                  </code>
+                </div>
+              )}
               <div className="text-xs text-claude-muted dark:text-night-muted">
-                本地启动指令：
+                {entry.stdioCommand
+                  ? '说明 / 网页版手动启动方式：'
+                  : '本地启动指令：'}
               </div>
               <pre className="text-[11px] font-mono whitespace-pre-wrap break-words bg-black/[0.03] dark:bg-white/[0.03] rounded p-2 max-h-48 overflow-y-auto">
                 {entry.installInstructions}
@@ -2628,39 +2754,51 @@ function McpMarketRow({
               </button>
             </>
           ) : (
-            <>
-              <div className="text-[11px] text-claude-muted dark:text-night-muted">
-                HTTP endpoint：
-                <code className="ml-1 font-mono">{entry.endpointUrl}</code>
+            <div className="text-[11px] text-claude-muted dark:text-night-muted">
+              HTTP endpoint：
+              <code className="ml-1 font-mono">{entry.endpointUrl}</code>
+            </div>
+          )}
+          {needsTokenInput && (
+            <div className="space-y-1">
+              <div className="text-xs text-claude-muted dark:text-night-muted">
+                {isStdio && entry.stdioCommand?.envKeys?.[0] ? (
+                  <>
+                    环境变量{' '}
+                    <code className="font-mono">
+                      {entry.stdioCommand.envKeys[0]}
+                    </code>
+                    （安装时注入到子进程）
+                  </>
+                ) : (
+                  <>Bearer token（可选填，不填可先尝试匿名）</>
+                )}
+                {entry.authHelpUrl && (
+                  <>
+                    {' · '}
+                    <a
+                      href={entry.authHelpUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="underline"
+                    >
+                      在哪里拿
+                    </a>
+                  </>
+                )}
               </div>
-              {entry.authType === 'bearer' && (
-                <div className="space-y-1">
-                  <div className="text-xs text-claude-muted dark:text-night-muted">
-                    Bearer token（可选填，不填可先尝试匿名）
-                    {entry.authHelpUrl && (
-                      <>
-                        {' · '}
-                        <a
-                          href={entry.authHelpUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="underline"
-                        >
-                          在哪里拿 token
-                        </a>
-                      </>
-                    )}
-                  </div>
-                  <input
-                    type="password"
-                    value={token}
-                    onChange={(e) => setToken(e.target.value)}
-                    placeholder="sk-..."
-                    className="w-full px-2 py-1 text-xs font-mono rounded border border-claude-border dark:border-night-border bg-white dark:bg-night-bg focus:outline-none"
-                  />
-                </div>
-              )}
-            </>
+              <input
+                type="password"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder={
+                  isStdio && entry.stdioCommand?.envKeys?.[0]?.includes('TOKEN')
+                    ? '粘贴 token / 密钥'
+                    : 'sk-...'
+                }
+                className="w-full px-2 py-1 text-xs font-mono rounded border border-claude-border dark:border-night-border bg-white dark:bg-night-bg focus:outline-none"
+              />
+            </div>
           )}
         </div>
       )}

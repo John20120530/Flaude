@@ -5,26 +5,54 @@
  * release, contents are hand-picked, dynamic registry integration is
  * deferred to v2.
  *
- * Two install paths:
- *   1. **Hosted HTTP endpoint** — user just clicks install, optionally
- *      pastes an auth token, and we hit `addMCPServer` + `connectMCPServer`.
- *      Works for MCPs published as remote services (Anthropic's hosted
- *      ones, paid SaaS adapters, the user's own teammate-hosted server).
- *   2. **Local stdio** — user has to run a command on their own machine
- *      to start the server. Flaude can't spawn stdio MCPs today (the
- *      MCP client only knows HTTP/SSE), so for these we just show the
- *      install instructions and a "copy command" button — no one-click.
- *      Most stdio MCPs from the official `modelcontextprotocol/servers`
- *      repo fall into this bucket.
+ * Three install paths:
+ *   1. **Hosted HTTP endpoint** (`endpointType: 'http'`) — user clicks
+ *      install, optionally pastes an auth token, and we hit
+ *      `addMCPServer` + `connectMCPServer`. Works for MCPs published as
+ *      remote services. Web + Tauri.
+ *   2. **Stdio one-click on Tauri** (`endpointType: 'stdio-instructions'`
+ *      WITH `stdioCommand` set) — Flaude spawns the npm/pip/etc command
+ *      itself via the `mcp_stdio_*` IPC commands (see
+ *      `src-tauri/src/mcp_stdio.rs`), pipes JSON-RPC over stdin/stdout,
+ *      and registers tools just like HTTP. Desktop only — the web build
+ *      falls through to path #3.
+ *   3. **Stdio instructions only** (no `stdioCommand`) — show install
+ *      command + copy button. User runs it themselves and either uses
+ *      `mcp-proxy` to expose HTTP, or stays in path #2 territory. This
+ *      is what the web build sees for every stdio entry.
  *
- * v1 seeds 6 entries: 2 HTTP (one-click) + 4 stdio (instructions only)
- * to demonstrate both flows. Auth handling for OAuth-based MCPs (e.g.
- * Linear, Notion) is deferred — v1 only handles "no auth" or "static
- * bearer token paste".
+ * v1.1 update: 5 stdio entries now ship `stdioCommand` so the desktop app
+ * can install them with one click. Web visitors still get instructions.
  */
 
 export type McpEndpointType = 'http' | 'stdio-instructions';
 export type McpAuthType = 'none' | 'bearer';
+
+/**
+ * Structured spawn config for stdio MCPs that support one-click install on
+ * Tauri. When present alongside `endpointType: 'stdio-instructions'`, the
+ * desktop app skips the "copy command and run it yourself" flow and
+ * directly spawns the child process via `mcp_stdio_spawn`.
+ *
+ * Designed to serialize 1:1 into `MCPStdioConfig` in the store. Env var
+ * placeholders (e.g. `${GITHUB_PERSONAL_ACCESS_TOKEN}`) are NOT
+ * substituted — the install UI prompts the user for token-style auth and
+ * sets the real values into `env` before spawn.
+ */
+export interface McpStdioCommand {
+  /** Executable. Usually `npx` for Node MCPs; could be `python`, `uvx`, etc. */
+  command: string;
+  /** CLI args (e.g. ["-y", "@modelcontextprotocol/server-memory"]). */
+  args: string[];
+  /**
+   * Environment variable names the server requires. Listed here so the
+   * install UI knows to ask the user for them. Values come in via the
+   * normal token-paste field and get merged into the spawn `env`.
+   *
+   * Example: `["GITHUB_PERSONAL_ACCESS_TOKEN"]` for the github MCP.
+   */
+  envKeys?: string[];
+}
 
 export interface McpMarketEntry {
   /** Stable id, `<publisher-slug>/<server-slug>`. Used to detect "installed" state. */
@@ -46,16 +74,24 @@ export interface McpMarketEntry {
   /**
    * For `endpointType: 'http'` — the MCP HTTP URL. Required.
    * For `endpointType: 'stdio-instructions'` — leave blank; the user
-   * copies the command from `installInstructions` and runs it locally.
+   * copies the command from `installInstructions` and runs it locally,
+   * OR (on Tauri) we spawn `stdioCommand` directly.
    */
   endpointUrl?: string;
   /**
    * For stdio MCPs — the npm/pip/cargo command the user runs to start
    * the server. Shown verbatim in the marketplace card with a copy
-   * button. Markdown supported.
+   * button. Markdown supported. Used as the FALLBACK for web visitors
+   * even when `stdioCommand` is also set.
    */
   installInstructions?: string;
-  /** Auth requirement for HTTP MCPs. Stdio entries always set 'none'. */
+  /**
+   * Optional structured spawn config. When present + running on Tauri,
+   * the install button spawns the child directly via `mcp_stdio_spawn`
+   * instead of just copying the command for the user to run.
+   */
+  stdioCommand?: McpStdioCommand;
+  /** Auth requirement. For stdio with `envKeys`, the token field becomes the env value paste. */
   authType: McpAuthType;
   /** Where to get a bearer token (e.g. "https://github.com/settings/tokens"). */
   authHelpUrl?: string;
@@ -97,7 +133,15 @@ export const MCP_MARKET: McpMarketEntry[] = [
     license: 'MIT',
     endpointType: 'stdio-instructions',
     installInstructions:
-      '本地启一个 stdio MCP，先用 npm 装：\n```\nnpm install -g @modelcontextprotocol/server-filesystem\n```\n然后让它服务某个目录：\n```\nmcp-server-filesystem /path/to/your/dir\n```\n**注意**：Flaude 当前 MCP 客户端只支持 HTTP/SSE，不能直接接 stdio。你需要用 `mcp-proxy` 这类工具把 stdio 包成 HTTP，再把 HTTP URL 加到 Flaude。',
+      '桌面版可以一键安装（自动 `npx -y @modelcontextprotocol/server-filesystem` 并把 stdio 接进 Flaude）。需要 Node.js 装在系统 PATH 里。\n\n网页版只能看说明，需要本地跑：\n```\nnpx -y @modelcontextprotocol/server-filesystem /path/to/your/dir\n```\n再用 `mcp-proxy` 包成 HTTP 才能让网页 Flaude 接。',
+    stdioCommand: {
+      command: 'npx',
+      // The trailing dot tells the server to expose the cwd of npx, which
+      // doesn't help us — but the server requires *some* directory arg.
+      // We point at the user's home as a safe default; advanced users can
+      // edit `stdioConfig.args` in Settings to pin a specific path.
+      args: ['-y', '@modelcontextprotocol/server-filesystem', '.'],
+    },
     authType: 'none',
     tools: ['list', 'read', 'write', 'watch'],
     tags: ['filesystem', 'stdio'],
@@ -115,7 +159,12 @@ export const MCP_MARKET: McpMarketEntry[] = [
     license: 'MIT',
     endpointType: 'stdio-instructions',
     installInstructions:
-      '```\nnpm install -g @modelcontextprotocol/server-github\n```\n启动时设置环境变量：\n```\nGITHUB_PERSONAL_ACCESS_TOKEN=<your token> mcp-server-github\n```\n同样要 `mcp-proxy` 包成 HTTP 才能让 Flaude 接。token 在 https://github.com/settings/tokens 生成。',
+      '桌面版可以一键安装。粘贴 PAT（在 https://github.com/settings/tokens 生成，勾选 `repo` + `read:org`）后 Flaude 自动 `npx -y @modelcontextprotocol/server-github`。\n\n网页版需要本地跑：\n```\nGITHUB_PERSONAL_ACCESS_TOKEN=<token> npx -y @modelcontextprotocol/server-github\n```',
+    stdioCommand: {
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-github'],
+      envKeys: ['GITHUB_PERSONAL_ACCESS_TOKEN'],
+    },
     authType: 'bearer',
     authHelpUrl: 'https://github.com/settings/tokens',
     tools: ['list_repos', 'get_issue', 'create_issue', 'list_pulls', 'merge_pull'],
@@ -132,8 +181,11 @@ export const MCP_MARKET: McpMarketEntry[] = [
       'https://github.com/modelcontextprotocol/servers/tree/main/src/postgres',
     license: 'MIT',
     endpointType: 'stdio-instructions',
+    // No stdioCommand — we don't bake the connection string into the
+    // manifest because every user has a different DB. UI guides them to
+    // add manually via the MCP servers section after editing args.
     installInstructions:
-      '```\nnpm install -g @modelcontextprotocol/server-postgres\nmcp-server-postgres "postgresql://user:pwd@host/db"\n```\n生产用强烈建议只给只读账号 + 把 server bind 在 localhost。',
+      '桌面版需要一个连接串 ARG，一键装暂不支持（每人 DB 不同）。手动跑：\n```\nnpx -y @modelcontextprotocol/server-postgres "postgresql://user:pwd@host/db"\n```\n生产用强烈建议只给只读账号 + 把 server bind 在 localhost。',
     authType: 'none',
     tools: ['query', 'list_tables', 'describe_table'],
     tags: ['database', 'stdio'],
@@ -150,7 +202,12 @@ export const MCP_MARKET: McpMarketEntry[] = [
     license: 'MIT',
     endpointType: 'stdio-instructions',
     installInstructions:
-      '```\nnpm install -g @modelcontextprotocol/server-slack\nSLACK_BOT_TOKEN=<xoxb-...> mcp-server-slack\n```\nbot token 在你的 Slack App 后台 → OAuth & Permissions 拿。',
+      '桌面版可以一键安装。粘贴 Slack Bot Token（`xoxb-...`，在你的 Slack App 后台 → OAuth & Permissions 拿）后 Flaude 自动 `npx -y @modelcontextprotocol/server-slack`。\n\n网页版需要本地跑：\n```\nSLACK_BOT_TOKEN=<xoxb-...> npx -y @modelcontextprotocol/server-slack\n```',
+    stdioCommand: {
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-slack'],
+      envKeys: ['SLACK_BOT_TOKEN'],
+    },
     authType: 'bearer',
     authHelpUrl: 'https://api.slack.com/apps',
     tools: ['list_channels', 'post_message', 'list_users', 'get_thread'],
@@ -168,7 +225,11 @@ export const MCP_MARKET: McpMarketEntry[] = [
     license: 'MIT',
     endpointType: 'stdio-instructions',
     installInstructions:
-      '```\nnpm install -g @modelcontextprotocol/server-memory\nmcp-server-memory\n```\n数据存在 `~/.config/modelcontextprotocol/memory.json`。',
+      '桌面版可以一键安装（自动 `npx -y @modelcontextprotocol/server-memory`）。数据存在 `~/.config/modelcontextprotocol/memory.json`。\n\n网页版需要本地跑：\n```\nnpx -y @modelcontextprotocol/server-memory\n```',
+    stdioCommand: {
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-memory'],
+    },
     authType: 'none',
     tools: ['add_entity', 'add_relation', 'search', 'get_entity'],
     tags: ['memory', 'stdio'],

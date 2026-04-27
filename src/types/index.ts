@@ -154,14 +154,51 @@ export interface StreamChunk {
   usage?: { promptTokens: number; completionTokens: number };
 }
 
-/** A remote Model Context Protocol server the user has connected. */
+/**
+ * Configuration for a stdio-based MCP server. Tauri-only; on web the entry
+ * exists in the manifest but install just shows the npm command.
+ *
+ * The host module `src-tauri/src/mcp_stdio.rs` spawns the command, pipes
+ * stdin/stdout, and exposes `mcp_stdio_send` / `mcp_stdio_recv` IPC. The
+ * runtime stdio session id (issued by spawn, regenerated each time we
+ * reconnect) is NOT stored here — it's transient and lives in
+ * `lib/mcp.ts`'s `stdioSessions` map for the life of the app process.
+ */
+export interface MCPStdioConfig {
+  /** Command to run (e.g. "npx", "node", "python"). */
+  command: string;
+  /** CLI args (e.g. ["-y", "@modelcontextprotocol/server-memory"]). */
+  args: string[];
+  /**
+   * Environment variables. Common use: `GITHUB_PERSONAL_ACCESS_TOKEN`,
+   * `SLACK_BOT_TOKEN`, etc. Stored as plaintext — same trust model as the
+   * existing HTTP `token` field.
+   */
+  env?: Record<string, string>;
+  /** Optional working directory. Most stdio MCPs don't care. */
+  cwd?: string;
+}
+
+/** A connected Model Context Protocol server (HTTP or stdio). */
 export interface MCPServer {
   id: string;
   name: string;
-  url: string;                   // e.g. "https://example.com/mcp"
-  token?: string;                // Optional Bearer token
+  /**
+   * Wire transport. Defaults to `'http'` when omitted (legacy entries
+   * predating the stdio support were all HTTP).
+   */
+  transport?: 'http' | 'stdio';
+  /**
+   * HTTP endpoint URL — used only when `transport === 'http'`. For stdio
+   * entries we leave this as an empty string for back-compat with the
+   * `installedUrls` set used by the marketplace UI.
+   */
+  url: string;
+  /** Bearer token for HTTP. Ignored for stdio (use `stdioConfig.env`). */
+  token?: string;
+  /** Stdio spawn config — required when `transport === 'stdio'`. */
+  stdioConfig?: MCPStdioConfig;
   enabled: boolean;
-  /** Populated after a successful connect(). */
   status: 'disconnected' | 'connecting' | 'connected' | 'error';
   lastError?: string;
   /** Tool names discovered on the server (flat list for UI). */
