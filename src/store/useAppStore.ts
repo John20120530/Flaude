@@ -85,6 +85,48 @@ export interface ConflictRecord {
 export const CONFLICT_TTL_MS = 60 * 60 * 1000;
 
 /**
+ * Idle auto-logout window. After the user has been "gone" (app closed,
+ * tab closed, machine asleep) for this long, we scrub the auth token on
+ * rehydrate and route them to the login screen.
+ *
+ * 5 minutes matches the user's request and is short enough that a
+ * leaving-the-machine-and-coming-back-tomorrow scenario forces re-auth,
+ * but generous enough that "close laptop lid for the meeting / open
+ * back up" doesn't kick people out repeatedly.
+ *
+ * Note: this is a *convenience* feature, not a security boundary. An
+ * attacker with file-system access to the machine could read the token
+ * out of localStorage during the window. Treat it as "shared device
+ * lock screen" parity, not as a real session cap — that'd require
+ * server-side session timeouts on the JWT.
+ */
+export const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Pure helper used by onRehydrateStorage to decide whether to scrub
+ * `auth`. Lives outside the store closure so it can be unit-tested
+ * without spinning up a persist round-trip.
+ *
+ * Returns true when:
+ *   - There IS a persisted auth (otherwise nothing to clear)
+ *   - lastActiveAt is a real timestamp (not 0/undefined — those mean
+ *     "fresh state, never seen alive", which we leave alone to avoid
+ *     kicking out users on first install / upgrade)
+ *   - The timestamp is older than the idle window
+ */
+export function shouldClearAuthOnRehydrate(opts: {
+  auth: AuthState | null;
+  lastActiveAt: number | undefined | null;
+  now: number;
+  timeoutMs?: number;
+}): boolean {
+  if (!opts.auth) return false;
+  const last = opts.lastActiveAt;
+  if (typeof last !== 'number' || last <= 0) return false;
+  return opts.now - last > (opts.timeoutMs ?? IDLE_TIMEOUT_MS);
+}
+
+/**
  * A pending `fs_write_file` call, paused at the approval modal. See
  * AppState.pendingWrites for lifecycle + persistence notes.
  */
@@ -230,6 +272,24 @@ interface AppState {
    * the team via a single admin-managed secret.
    */
   auth: AuthState | null;
+
+  /**
+   * Unix ms of the last "I'm alive" heartbeat. Refreshed once per minute
+   * by App.tsx while the user is logged in, plus on visibilitychange /
+   * pagehide / beforeunload so we capture the moment the user closed
+   * the tab / quit the app.
+   *
+   * On rehydrate, if `Date.now() - lastActiveAt > IDLE_TIMEOUT_MS` we
+   * scrub `auth` and force a re-login — implements the auto-logout
+   * after the user's been gone for too long. Conversation/skill/etc.
+   * data stays; only the session token is cleared.
+   *
+   * Default 0 (never seen alive) means "old persisted state predates
+   * this field" — we treat that as fresh-enough to keep auth (no
+   * surprise logout on upgrade). The first heartbeat after upgrade
+   * sets a real value.
+   */
+  lastActiveAt: number;
 
   // ---------------------------------------------------------------------------
   // Sync (Phase 3 — conversation history round-trip).
@@ -406,6 +466,9 @@ interface AppState {
   // Auth
   setAuth: (payload: { token: string; user: AuthUser }) => void;
   clearAuth: () => void;
+  /** Refresh the idle-timeout heartbeat. Called once per minute by App.tsx
+   *  + on visibilitychange/pagehide/beforeunload. */
+  setLastActiveAt: (ms: number) => void;
 
   // Sync (Phase 3). Mutations below bookkeep the dirty set; sync.ts owns the
   // actual transport, and calls these helpers to update cursor/state.
@@ -498,6 +561,7 @@ export const useAppStore = create<AppState>()(
       skills: [...BUILTIN_SKILLS],
 
       auth: null,
+      lastActiveAt: 0,
 
       lastSyncAt: null,
       dirtyConversationIds: [],
@@ -1202,7 +1266,14 @@ export const useAppStore = create<AppState>()(
 
       // Auth
       setAuth: ({ token, user }) =>
-        set({ auth: { token, user, loggedInAt: Date.now() } }),
+        set({
+          auth: { token, user, loggedInAt: Date.now() },
+          // Fresh login resets the idle clock — otherwise a user who was
+          // away for 6 minutes would log in successfully, then get kicked
+          // back to the login screen on the next render.
+          lastActiveAt: Date.now(),
+        }),
+      setLastActiveAt: (ms) => set({ lastActiveAt: ms }),
       clearAuth: () =>
         // Logout wipes *everything* tied to the user's identity — auth, sync
         // bookkeeping, and the full content set (conversations, projects,
@@ -1713,6 +1784,7 @@ export const useAppStore = create<AppState>()(
         // Auth — persisted so a restart doesn't force re-login. See AuthState
         // comment for the threat-model rationale.
         auth: s.auth,
+        lastActiveAt: s.lastActiveAt,
         // Sync cursor + dirty/deletion queues. Persisted so a restart mid-
         // edit-session resumes exactly where we left off — otherwise we'd
         // either re-push unchanged rows (wasteful) or drop pending deletions
@@ -1808,6 +1880,28 @@ export const useAppStore = create<AppState>()(
         if (typeof state.codeBottomPanelHeight !== 'number') {
           state.codeBottomPanelHeight = 180;
         }
+        // Idle auto-logout: if the user's been gone longer than the
+        // timeout, scrub their auth on rehydrate so they hit the login
+        // screen instead of finding the app pre-warmed with their session.
+        // Conversation/skill/etc. data stays — we only clear the session
+        // token, same as a manual logout *minus* the data wipe (so quick
+        // re-logins don't have to re-pull everything from sync).
+        //
+        // `lastActiveAt: 0` (never seen) is treated as "fresh enough to
+        // keep" — covers users upgrading from a pre-v0.1.35 build whose
+        // persisted state predates this field; the next heartbeat sets a
+        // real value. Without this carve-out we'd kick everyone out on
+        // upgrade, which is hostile.
+        if (
+          state.auth &&
+          typeof state.lastActiveAt === 'number' &&
+          state.lastActiveAt > 0 &&
+          Date.now() - state.lastActiveAt > IDLE_TIMEOUT_MS
+        ) {
+          state.auth = null;
+          state.lastActiveAt = 0;
+        }
+        if (typeof state.lastActiveAt !== 'number') state.lastActiveAt = 0;
         // Re-seed the provider catalog from DEFAULT_PROVIDERS on every rehydrate.
         // The catalog (ids, displayName, baseUrl, models[], descriptions,
         // capabilities, context windows) is code-owned single source of truth;
