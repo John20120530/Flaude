@@ -307,4 +307,72 @@ admin.post('/admin/users/:id/password', async (c) => {
   return c.json({ ok: true });
 });
 
+// -----------------------------------------------------------------------------
+// DELETE /admin/users/:id
+//
+// Hard-delete a non-admin user. Cascades to all the user's data via the
+// schema's ON DELETE CASCADE on usage_log, conversations (which cascades
+// further to messages), projects, and artifacts.
+//
+// Guards (defense in depth):
+//   - Admins can only delete users with role='user'. Deleting another
+//     admin returns 403 — too easy to brick the deployment otherwise.
+//     Demote first (PATCH role=user), then delete if you really mean it.
+//   - Cannot delete yourself, regardless of role. Self-delete from the
+//     admin dashboard would log the actor out mid-action and is almost
+//     certainly a misclick.
+//   - User-not-found returns 404 (not a delete-was-noop 200) so the
+//     dashboard knows to refresh its stale view.
+//
+// We intentionally do NOT keep a soft-delete tombstone on the users
+// table. The original "no DELETE" comment said the operator might want
+// usage_log preserved — but for a deployed-and-deleted user the audit
+// value is low and the cascade keeps the schema clean. If we later
+// want a "ghosted-user" mode for analytics, add a `deleted_at` column
+// + filter index reads, don't try to dual-track via two paths.
+// -----------------------------------------------------------------------------
+admin.delete('/admin/users/:id', async (c) => {
+  const targetId = Number(c.req.param('id'));
+  if (!Number.isFinite(targetId)) {
+    return c.json({ error: 'invalid user id' }, 400);
+  }
+
+  const actorId = c.get('userId');
+  if (targetId === actorId) {
+    return c.json({ error: '不能删除自己' }, 400);
+  }
+
+  const target = await c.env.DB
+    .prepare('SELECT id, role FROM users WHERE id = ?')
+    .bind(targetId)
+    .first<{ id: number; role: 'admin' | 'user' }>();
+
+  if (!target) {
+    return c.json({ error: 'user not found' }, 404);
+  }
+  if (target.role === 'admin') {
+    return c.json(
+      { error: '不能删除其他管理员账户。先把对方降级为普通用户（角色 user）再删除。' },
+      403,
+    );
+  }
+
+  // Cascading delete: schema FKs handle usage_log / conversations /
+  // messages / projects / artifacts. Returns the deleted user's id so we
+  // can confirm the row really existed (sanity check against e.g. the
+  // CASCADE failing silently in some edge case).
+  const deleted = await c.env.DB
+    .prepare('DELETE FROM users WHERE id = ? RETURNING id')
+    .bind(targetId)
+    .first<{ id: number }>();
+
+  if (!deleted) {
+    // Race: the row was there during the SELECT but gone by the time
+    // DELETE ran. Surface as 404 — same outcome as "not found".
+    return c.json({ error: 'user not found' }, 404);
+  }
+
+  return c.json({ ok: true, deleted_id: deleted.id });
+});
+
 export default admin;

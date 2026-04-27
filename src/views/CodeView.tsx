@@ -188,6 +188,25 @@ export default function CodeView() {
     systemPrompt,
   });
 
+  // When the workspace changes (or is closed), the agent's accumulated
+  // context — file paths it has read, FLAUDE.md content, the project's
+  // build/test commands — all become stale. Continuing the same
+  // conversation under a new workspace produces confusing replies that
+  // mix old + new state, and the agent might still try to read paths
+  // that no longer exist.
+  //
+  // Solution: spawn a fresh code conversation when the workspace
+  // actually transitions. Skip the spawn if the user picked the same
+  // folder they already had open (idempotent reselect).
+  const switchWorkspaceWithNewConversation = (newPath: string) => {
+    const wasDifferent = (workspacePath || '') !== newPath;
+    setWorkspacePath(newPath);
+    if (wasDifferent) {
+      const id = newConversation('code');
+      navigate(`/code/${id}`, { replace: true });
+    }
+  };
+
   const openWorkspace = async () => {
     if (!isTauri()) {
       alert(
@@ -197,10 +216,14 @@ export default function CodeView() {
     }
     try {
       const picked = await pickFolder('选择工作区');
-      if (picked) setWorkspacePath(picked);
+      if (picked) switchWorkspaceWithNewConversation(picked);
     } catch (e) {
       alert((e as Error).message);
     }
+  };
+
+  const closeWorkspace = () => {
+    switchWorkspaceWithNewConversation('');
   };
 
   if (!conversation) return <div className="flex-1" />;
@@ -277,9 +300,9 @@ export default function CodeView() {
           </button>
           {workspacePath && (
             <button
-              onClick={() => setWorkspacePath('')}
+              onClick={closeWorkspace}
               className="btn-ghost shrink-0 px-2 justify-center text-xs"
-              title="关闭工作区（不会删除任何文件）"
+              title="关闭工作区（不会删除任何文件，会开新对话）"
               aria-label="关闭工作区"
             >
               <X className="w-3.5 h-3.5" />

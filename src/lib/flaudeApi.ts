@@ -291,6 +291,29 @@ export function adminResetPassword(id: number, password: string): Promise<{ ok: 
   return authPostJson<{ ok: true }>(`/admin/users/${id}/password`, { password });
 }
 
+/**
+ * Hard-delete a non-admin user. The server cascades to wipe the user's
+ * conversations / messages / projects / artifacts / usage_log via FK
+ * ON DELETE CASCADE. Returns the deleted user id on success.
+ *
+ * Server-enforced guards:
+ *   - actor cannot be the same as target (no self-delete) → 400
+ *   - target cannot have role='admin' (demote first) → 403
+ *   - non-existent target → 404
+ */
+export async function adminDeleteUser(id: number): Promise<{ ok: true; deleted_id: number }> {
+  const res = await authFetch(`/admin/users/${id}`, { method: 'DELETE' });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new FlaudeApiError(
+      res.status,
+      (body as { error?: string } | null)?.error ?? `请求失败 HTTP ${res.status}`,
+      body,
+    );
+  }
+  return body as { ok: true; deleted_id: number };
+}
+
 // -----------------------------------------------------------------------------
 // Sync endpoints (Phase 3 — conversation history round-trip).
 //

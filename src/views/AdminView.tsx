@@ -29,11 +29,13 @@ import {
   RotateCcw,
   X,
   Shield,
+  Trash2,
   User as UserIcon,
 } from 'lucide-react';
 
 import {
   adminCreateUser,
+  adminDeleteUser,
   adminListUsers,
   adminResetPassword,
   adminUpdateUser,
@@ -179,6 +181,32 @@ export default function AdminView() {
     }
   };
 
+  const deleteUser = async (user: AdminUser) => {
+    // Two-stage confirm because this is irreversible — wipes all the
+    // user's conversations, messages, projects, artifacts, and usage_log
+    // rows via FK CASCADE on the server.
+    const msg =
+      `⚠️ 永久删除「${user.display_name}」（${user.email}）？\n\n` +
+      `这会同时删除该用户的所有对话、消息、项目、工件和使用记录。\n` +
+      `操作不可撤销。如果只是想停止 ta 的使用，用「禁用」按钮即可。`;
+    if (!confirm(msg)) return;
+    // Second prompt to type the email — friction proportional to blast radius.
+    const typed = prompt(
+      `再次确认：输入用户的 email「${user.email}」以删除：`,
+    );
+    if (typed?.trim() !== user.email) {
+      if (typed !== null) alert('email 不匹配，已取消删除。');
+      return;
+    }
+    try {
+      await adminDeleteUser(user.id);
+      setFlash(`已删除「${user.display_name}」及其所有数据`);
+      void load();
+    } catch (err) {
+      alert(err instanceof FlaudeApiError ? err.message : (err as Error).message);
+    }
+  };
+
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="max-w-5xl mx-auto px-6 py-8 space-y-6">
@@ -261,6 +289,7 @@ export default function AdminView() {
                     onToggleRole={() => toggleRole(u)}
                     onEditQuota={() => setModal({ kind: 'quota', user: u })}
                     onResetPassword={() => setModal({ kind: 'password', user: u })}
+                    onDelete={() => deleteUser(u)}
                   />
                 ))
               )}
@@ -322,6 +351,7 @@ function UserRow({
   onToggleRole,
   onEditQuota,
   onResetPassword,
+  onDelete,
 }: {
   user: AdminUser;
   isSelf: boolean;
@@ -330,6 +360,7 @@ function UserRow({
   onToggleRole: () => void;
   onEditQuota: () => void;
   onResetPassword: () => void;
+  onDelete: () => void;
 }) {
   const effectiveQuota =
     user.monthly_quota_tokens ?? envDefaultQuota;
@@ -422,7 +453,9 @@ function UserRow({
           >
             <Key className="w-3.5 h-3.5" />
           </button>
-          {/* Role / disable controls hidden for self-row to match server guard. */}
+          {/* Role / disable / delete controls hidden for self-row to match
+              server guards. Delete is also hidden for admins — the server
+              would 403, but a hidden button beats a click → error popup. */}
           {!isSelf && (
             <>
               <button
@@ -448,6 +481,15 @@ function UserRow({
                   <Ban className="w-3.5 h-3.5" />
                 )}
               </button>
+              {user.role !== 'admin' && (
+                <button
+                  onClick={onDelete}
+                  className="btn-ghost text-xs text-red-500 hover:text-red-600"
+                  title="永久删除该用户及其所有数据"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
             </>
           )}
         </div>
