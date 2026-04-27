@@ -16,7 +16,12 @@
  * we focus on pure state transitions.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useAppStore, type AuthUser } from './useAppStore';
+import {
+  IDLE_TIMEOUT_MS,
+  shouldClearAuthOnRehydrate,
+  useAppStore,
+  type AuthUser,
+} from './useAppStore';
 import type { Conversation, Message, Project } from '@/types';
 import type { Artifact } from '@/lib/artifacts';
 
@@ -959,5 +964,99 @@ describe('restoreConflict / dismissConflict', () => {
     const s = useAppStore.getState();
     expect(s.conversations).toHaveLength(1);
     expect(s.conversations[0].title).toBe('brought-back');
+  });
+});
+
+describe('shouldClearAuthOnRehydrate (idle timeout)', () => {
+  const auth = {
+    token: 'tok',
+    user: {
+      id: 1,
+      email: 'me@example.com',
+      display_name: 'me',
+      role: 'user' as const,
+    },
+    loggedInAt: 0,
+  };
+  const NOW = 100_000_000;
+
+  it('returns false when there is no auth (nothing to clear)', () => {
+    expect(
+      shouldClearAuthOnRehydrate({ auth: null, lastActiveAt: 0, now: NOW }),
+    ).toBe(false);
+  });
+
+  it('returns false when lastActiveAt is 0 (state predates this field — preserve auth on upgrade)', () => {
+    expect(
+      shouldClearAuthOnRehydrate({ auth, lastActiveAt: 0, now: NOW }),
+    ).toBe(false);
+  });
+
+  it('returns false when lastActiveAt is missing (undefined / null)', () => {
+    expect(
+      shouldClearAuthOnRehydrate({ auth, lastActiveAt: undefined, now: NOW }),
+    ).toBe(false);
+    expect(
+      shouldClearAuthOnRehydrate({ auth, lastActiveAt: null, now: NOW }),
+    ).toBe(false);
+  });
+
+  it('returns false when within the idle window (4 minutes idle, 5 min cap)', () => {
+    expect(
+      shouldClearAuthOnRehydrate({
+        auth,
+        lastActiveAt: NOW - 4 * 60 * 1000,
+        now: NOW,
+      }),
+    ).toBe(false);
+  });
+
+  it('returns false at exactly the boundary (5 min, not strictly greater)', () => {
+    expect(
+      shouldClearAuthOnRehydrate({
+        auth,
+        lastActiveAt: NOW - IDLE_TIMEOUT_MS,
+        now: NOW,
+      }),
+    ).toBe(false);
+  });
+
+  it('returns true past the idle window', () => {
+    expect(
+      shouldClearAuthOnRehydrate({
+        auth,
+        lastActiveAt: NOW - IDLE_TIMEOUT_MS - 1,
+        now: NOW,
+      }),
+    ).toBe(true);
+  });
+
+  it('returns true after a long absence (overnight, 8 hours)', () => {
+    expect(
+      shouldClearAuthOnRehydrate({
+        auth,
+        lastActiveAt: NOW - 8 * 60 * 60 * 1000,
+        now: NOW,
+      }),
+    ).toBe(true);
+  });
+
+  it('honors a custom timeoutMs override (test seam, not used in production)', () => {
+    expect(
+      shouldClearAuthOnRehydrate({
+        auth,
+        lastActiveAt: NOW - 2_000,
+        now: NOW,
+        timeoutMs: 1_000,
+      }),
+    ).toBe(true);
+    expect(
+      shouldClearAuthOnRehydrate({
+        auth,
+        lastActiveAt: NOW - 500,
+        now: NOW,
+        timeoutMs: 1_000,
+      }),
+    ).toBe(false);
   });
 });

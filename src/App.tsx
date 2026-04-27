@@ -46,6 +46,35 @@ export default function App() {
     void startSync();
   }, [auth?.user.id]);
 
+  // Idle-timeout heartbeat. Refreshes `lastActiveAt` while the user is
+  // logged in so we can tell, on next app launch, whether they were
+  // away too long (see IDLE_TIMEOUT_MS in useAppStore). Fires:
+  //   - once immediately (covers the case where the user just logged in)
+  //   - once per minute via setInterval (slow enough to be cheap, fast
+  //     enough that a single missed heartbeat doesn't spuriously log out)
+  //   - on visibilitychange / pagehide / beforeunload, so we capture the
+  //     *exact* moment the user left rather than relying on the last
+  //     timer tick (could be up to ~60 s stale otherwise)
+  //
+  // Effect deps include only `auth?.user.id` so a token refresh doesn't
+  // tear down + recreate the listeners. The empty-effect early-return
+  // when logged out is what removes them after a clearAuth.
+  useEffect(() => {
+    if (!auth) return;
+    const beat = () => useAppStore.getState().setLastActiveAt(Date.now());
+    beat();
+    const interval = setInterval(beat, 60_000);
+    document.addEventListener('visibilitychange', beat);
+    window.addEventListener('pagehide', beat);
+    window.addEventListener('beforeunload', beat);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', beat);
+      window.removeEventListener('pagehide', beat);
+      window.removeEventListener('beforeunload', beat);
+    };
+  }, [auth?.user.id]);
+
   // Auth gate: when no token, show LoginView full-screen instead of the shell.
   // authFetch() calls clearAuth() on 401/403, which flips this back to null
   // and drops the user back here on the next render. No router redirect needed.
