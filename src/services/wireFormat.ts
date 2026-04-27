@@ -55,11 +55,35 @@ export function serializeMessages(messages: Message[], system?: string): WireMes
     if (tcid) respondedToolCallIds.add(tcid);
   }
 
-  for (const m of messages) {
+  // Second defensive pass: if multiple role='tool' messages share the same
+  // tool_call_id, the upstream returns 400 "Duplicate value for
+  // 'tool_call_id' of call_X in message[N]". Causes we've seen in the wild:
+  //   - regenerate races where the old tool message wasn't cleared before
+  //     the new turn appended its replacement
+  //   - stop-cleanup synthesizing a "用户取消" tool message while a real
+  //     tool message for the same id was already in flight
+  //   - imported / restored conversations from a backup with a corrupted
+  //     state
+  // Build the set of ids whose LATEST occurrence we want to keep, then
+  // skip earlier copies during emission. Last-write-wins: the most recent
+  // tool result is the most accurate state.
+  const lastIndexById = new Map<string, number>();
+  messages.forEach((m, i) => {
+    if (m.role !== 'tool') return;
+    const tcid = m.toolCalls?.[0]?.id;
+    if (tcid) lastIndexById.set(tcid, i);
+  });
+
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i]!;
     if (m.role === 'tool') {
+      const tcid = m.toolCalls?.[0]?.id;
+      // Skip every tool message whose tool_call_id has a LATER occurrence —
+      // we'll emit the freshest one when we reach it.
+      if (tcid && lastIndexById.get(tcid) !== i) continue;
       out.push({
         role: 'tool',
-        tool_call_id: m.toolCalls?.[0]?.id,
+        tool_call_id: tcid,
         content: m.content,
       });
       continue;

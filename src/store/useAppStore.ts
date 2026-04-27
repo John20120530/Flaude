@@ -127,6 +127,9 @@ interface AppState {
   artifactsOpen: boolean;
   /** Width (px) of the right-side artifacts panel. Drag-resizable, persisted. */
   artifactsPanelWidth: number;
+  /** Height (px) of the Code-mode bottom panel (Tools/Terminal/Git/后台任务).
+   *  Drag-resizable via the divider above the tabs. */
+  codeBottomPanelHeight: number;
   activeMode: WorkMode;
 
   // Data
@@ -277,6 +280,7 @@ interface AppState {
   toggleSidebar: () => void;
   toggleArtifacts: () => void;
   setArtifactsPanelWidth: (px: number) => void;
+  setCodeBottomPanelHeight: (px: number) => void;
   setActiveMode: (m: WorkMode) => void;
 
   newConversation: (mode?: WorkMode, projectId?: string) => string;
@@ -449,6 +453,7 @@ export const useAppStore = create<AppState>()(
       sidebarOpen: true,
       artifactsOpen: false,
       artifactsPanelWidth: 480,
+      codeBottomPanelHeight: 180,
       activeMode: 'chat',
 
       conversations: [],
@@ -496,6 +501,8 @@ export const useAppStore = create<AppState>()(
       // the panel at 10px or 5000px and make the layout look broken.
       setArtifactsPanelWidth: (px) =>
         set({ artifactsPanelWidth: Math.min(1200, Math.max(320, Math.round(px))) }),
+      setCodeBottomPanelHeight: (px) =>
+        set({ codeBottomPanelHeight: Math.min(800, Math.max(80, Math.round(px))) }),
       setActiveMode: (mode) => set({ activeMode: mode }),
 
       // Conversations
@@ -1627,6 +1634,7 @@ export const useAppStore = create<AppState>()(
         theme: s.theme,
         sidebarOpen: s.sidebarOpen,
         artifactsPanelWidth: s.artifactsPanelWidth,
+        codeBottomPanelHeight: s.codeBottomPanelHeight,
         activeMode: s.activeMode,
         // Strip the base64 `data` off attachments before writing to localStorage —
         // image data URLs can each be multi-MB, and localStorage has a ~5MB total
@@ -1755,6 +1763,10 @@ export const useAppStore = create<AppState>()(
         // Defensive: pre-v0.1.28 persisted state has no `hooks` array, which
         // would crash any selector that calls `.filter()` / `.map()` on it.
         if (!Array.isArray(state.hooks)) state.hooks = [];
+        // Defensive: pre-v0.1.30 persisted state has no codeBottomPanelHeight.
+        if (typeof state.codeBottomPanelHeight !== 'number') {
+          state.codeBottomPanelHeight = 180;
+        }
         // Re-seed the provider catalog from DEFAULT_PROVIDERS on every rehydrate.
         // The catalog (ids, displayName, baseUrl, models[], descriptions,
         // capabilities, context windows) is code-owned single source of truth;

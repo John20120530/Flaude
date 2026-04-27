@@ -334,6 +334,105 @@ describe('serializeMessages — mixed image + text attachments', () => {
   });
 });
 
+describe('serializeMessages — duplicate tool_call_id (regen race / stop overlap)', () => {
+  it('drops earlier tool messages when a later one shares the same tool_call_id (last-write-wins)', () => {
+    // Pathological history: two role=tool messages claim tool_call_id 'X'.
+    // Upstream rejects with 400 "Duplicate value for 'tool_call_id' of
+    // call_X in message[N]" — we emit only the freshest one.
+    const out = serializeMessages([
+      userMsg({ id: 'u', role: 'user', content: 'go' }),
+      userMsg({
+        id: 'a',
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'X', name: 'fs_read_file', arguments: {}, status: 'success' }],
+      }),
+      userMsg({
+        id: 't1',
+        role: 'tool',
+        content: 'STALE result',
+        toolCalls: [{ id: 'X', name: 'fs_read_file', arguments: {}, status: 'success' }],
+      }),
+      userMsg({
+        id: 't2',
+        role: 'tool',
+        content: 'FRESH result',
+        toolCalls: [{ id: 'X', name: 'fs_read_file', arguments: {}, status: 'success' }],
+      }),
+    ]);
+    const toolMessages = out.filter((m) => m.role === 'tool');
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0]).toEqual({
+      role: 'tool',
+      tool_call_id: 'X',
+      content: 'FRESH result',
+    });
+  });
+
+  it('handles a triple duplicate (stop-cleanup synthesizing twice + real result) — emits exactly one', () => {
+    const out = serializeMessages([
+      userMsg({
+        id: 'a',
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'X', name: 't', arguments: {}, status: 'success' }],
+      }),
+      userMsg({
+        id: 't1',
+        role: 'tool',
+        content: 'first',
+        toolCalls: [{ id: 'X', name: 't', arguments: {}, status: 'success' }],
+      }),
+      userMsg({
+        id: 't2',
+        role: 'tool',
+        content: 'second',
+        toolCalls: [{ id: 'X', name: 't', arguments: {}, status: 'success' }],
+      }),
+      userMsg({
+        id: 't3',
+        role: 'tool',
+        content: 'third',
+        toolCalls: [{ id: 'X', name: 't', arguments: {}, status: 'success' }],
+      }),
+    ]);
+    const toolMessages = out.filter((m) => m.role === 'tool');
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0]?.content).toBe('third');
+  });
+
+  it('keeps tool messages with distinct ids (no false positive dedup)', () => {
+    const out = serializeMessages([
+      userMsg({
+        id: 'a',
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          { id: 'A', name: 't', arguments: {}, status: 'success' },
+          { id: 'B', name: 't', arguments: {}, status: 'success' },
+          { id: 'C', name: 't', arguments: {}, status: 'success' },
+        ],
+      }),
+      userMsg({
+        id: 't1', role: 'tool', content: 'a-result',
+        toolCalls: [{ id: 'A', name: 't', arguments: {}, status: 'success' }],
+      }),
+      userMsg({
+        id: 't2', role: 'tool', content: 'b-result',
+        toolCalls: [{ id: 'B', name: 't', arguments: {}, status: 'success' }],
+      }),
+      userMsg({
+        id: 't3', role: 'tool', content: 'c-result',
+        toolCalls: [{ id: 'C', name: 't', arguments: {}, status: 'success' }],
+      }),
+    ]);
+    const ids = out
+      .filter((m) => m.role === 'tool')
+      .map((m) => (m as { tool_call_id: string }).tool_call_id);
+    expect(ids).toEqual(['A', 'B', 'C']);
+  });
+});
+
 describe('serializeMessages — orphan tool_calls (user clicked Stop mid-call)', () => {
   it('drops a tool_call that has no matching tool message — assistant becomes plain text', () => {
     // History: user → assistant with tool_calls but NO subsequent tool message.

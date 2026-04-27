@@ -157,6 +157,32 @@ export default function CodeView() {
   );
   const [showHidden, setShowHidden] = useState(false);
 
+  // Drag-to-resize the bottom panel (Tools/Terminal/Git/后台任务). Same
+  // closure-captures-startY pattern as the artifacts panel in AppShell —
+  // store action clamps to [80, 800] so we don't have to re-clamp here.
+  const bottomPanelHeight = useAppStore((s) => s.codeBottomPanelHeight);
+  const setBottomPanelHeight = useAppStore((s) => s.setCodeBottomPanelHeight);
+  const onBottomDragStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = bottomPanelHeight;
+    const onMove = (ev: MouseEvent) => {
+      // Divider sits ABOVE the bottom panel — moving the mouse UP grows the
+      // panel (more room for output), DOWN shrinks it.
+      setBottomPanelHeight(startH + (startY - ev.clientY));
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+  };
+
   // We poll bgshell from CodeView (not just the panel) so the tab badge
   // shows a running count even when the user is on the Tools/Terminal tab.
   // Cost: one IPC call every 2s. Pays for itself the first time someone
@@ -313,8 +339,23 @@ export default function CodeView() {
           />
         </div>
 
+        {/* Drag handle for resizing the bottom panel. Sits above the tab
+            strip; user drags up to grow the panel, down to shrink. We
+            give it a generous hit area (h-1.5) but no visual noise — only
+            the cursor change + a subtle accent on hover signals that it
+            grabs. */}
+        <div
+          onMouseDown={onBottomDragStart}
+          className="h-1.5 shrink-0 cursor-row-resize bg-claude-border dark:bg-night-border hover:bg-claude-accent/60 transition-colors"
+          aria-label="拖动调整面板高度"
+          role="separator"
+          aria-orientation="horizontal"
+        />
         {/* Bottom tabs */}
-        <div className="h-[180px] shrink-0 border-t border-claude-border dark:border-night-border bg-claude-surface dark:bg-night-surface">
+        <div
+          className="shrink-0 border-t border-claude-border dark:border-night-border bg-claude-surface dark:bg-night-surface"
+          style={{ height: `${bottomPanelHeight}px` }}
+        >
           <div className="h-8 flex items-center border-b border-claude-border dark:border-night-border">
             {(['tools', 'terminal', 'git', 'background'] as const).map((t) => (
               <button
@@ -363,7 +404,11 @@ export default function CodeView() {
             The Terminal's ResizeObserver also silently skips fit() when the
             element is display:none, so no extra gating needed.
           */}
-          <div className="h-[148px] relative">
+          {/* Tab content fills whatever height remains after the 32px tab
+              strip. Using inset-0 inside `flex-1` keeps the absolute-
+              positioned tab panes (Terminal, ToolActivityPanel) sized
+              correctly at any height. */}
+          <div className="relative" style={{ height: `${bottomPanelHeight - 32}px` }}>
             <div className={cn('absolute inset-0 overflow-y-auto', bottomTab !== 'tools' && 'hidden')}>
               <ToolActivityPanel messages={conversation.messages} />
             </div>
