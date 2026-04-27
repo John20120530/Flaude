@@ -162,6 +162,45 @@ export interface MCPServer {
 }
 
 /**
+ * User-configured automation hook. Runs a shell command in response to
+ * specific Code-mode events. Tauri-only — the runner uses the desktop
+ * shell_exec IPC.
+ *
+ * Events:
+ *   - 'pre_tool_use'  — fires BEFORE a matching tool executes. Exit 0 →
+ *                       tool proceeds normally. Exit ≠ 0 → tool is blocked,
+ *                       hook's stderr becomes the tool result text.
+ *   - 'post_tool_use' — fires AFTER a matching tool succeeds. Hook
+ *                       stdout/stderr is appended to the tool result so
+ *                       the agent sees it next round.
+ *   - 'stop'          — fires when the agent turn ends. Output discarded.
+ *
+ * Substitution variables in `command` (replaced before shell wrapping):
+ *   $FLAUDE_TOOL          — tool name
+ *   $FLAUDE_FILE          — fs_write_file: the path argument; empty otherwise
+ *   $FLAUDE_WORKSPACE     — current Code-mode workspace path
+ *   $FLAUDE_ARGS_JSON     — JSON of the tool's arguments (single-quoted, escaped)
+ *
+ * Tool matcher is a simple pipe-separated allowlist (e.g. "fs_write_file"
+ * or "fs_write_file|shell_exec"). `*` matches any tool. Ignored when
+ * event === 'stop'.
+ */
+export interface Hook {
+  id: string;
+  name: string;
+  enabled: boolean;
+  event: 'pre_tool_use' | 'post_tool_use' | 'stop';
+  /** Pipe-separated tool names, or '*' for any tool. Ignored for 'stop'. */
+  toolMatcher: string;
+  /** Shell command. Wrapped in `cmd /c` on Windows, `sh -c` elsewhere. */
+  command: string;
+  /** Default 30000. Killed at this point; tool result text mentions the timeout. */
+  timeoutMs: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
  * A user-defined (or built-in) slash command.
  *
  * Two kinds:

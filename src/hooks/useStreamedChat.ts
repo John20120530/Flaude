@@ -15,6 +15,12 @@ import {
   isDestructiveToolName,
 } from '@/lib/planModeRuntime';
 import { requestPlanApproval } from '@/lib/planMode';
+import {
+  formatHookOutputForAgent,
+  matchTool,
+  runHook,
+  type HookVars,
+} from '@/lib/hooks';
 import type {
   Attachment,
   Conversation,
@@ -96,6 +102,45 @@ function composeSystemWithSummary(
   if (!summary || !summary.trim()) return basePrompt;
   const header = '\n\n## 对话摘要（已压缩的早期历史）\n\n';
   return (basePrompt ?? '') + header + summary.trim();
+}
+
+/**
+ * Builtin tools that mutate ONLY the conversation (todo list, artifacts,
+ * the plan-mode terminator). Hooks targeting these wouldn't have anything
+ * meaningful to gate against — the tool doesn't touch the file system or
+ * shell. Skipping them here saves a few hundred ms per call by avoiding
+ * an unnecessary shellExec round-trip.
+ */
+const TOOLS_WITHOUT_HOOKS = new Set([
+  'todo_write',
+  'create_artifact',
+  'exit_plan_mode',
+]);
+
+function shouldFireToolHooks(toolName: string): boolean {
+  return !TOOLS_WITHOUT_HOOKS.has(toolName);
+}
+
+/** Pull the substitution variables for a tool call. fs_write_file's
+ *  `path` argument is the only one we extract specifically; everything
+ *  else gets the generic JSON dump of args.
+ */
+function buildHookVars(
+  toolName: string,
+  args: Record<string, unknown>,
+): HookVars {
+  const workspace = useAppStore.getState().workspacePath ?? '';
+  const file =
+    toolName === 'fs_write_file' && typeof args.path === 'string'
+      ? args.path
+      : '';
+  let argsJson = '';
+  try {
+    argsJson = JSON.stringify(args);
+  } catch {
+    argsJson = '{}';
+  }
+  return { tool: toolName, workspace, file, argsJson };
 }
 
 export function useStreamedChat({ conversation, systemPrompt }: Options) {
@@ -411,6 +456,30 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
               `工具 "${tc.name}" 在 Plan 模式中被锁定。请先调用 exit_plan_mode 提交计划，等用户批准后再执行副作用操作。`,
             );
           }
+
+          // Pre-tool-use hooks. Each runs sequentially; first non-zero exit
+          // BLOCKS the tool, with the hook's stderr (or stdout fallback)
+          // becoming the synthetic tool result so the model knows why.
+          // Builtin tools that mutate the conversation only (todo_write,
+          // create_artifact, exit_plan_mode) skip hook firing — they have
+          // no shell side-effect a hook would meaningfully gate against,
+          // and firing pointlessly slows the loop.
+          const hookVars = buildHookVars(tc.name, args);
+          const enabledHooks = useAppStore.getState().hooks.filter((h) => h.enabled);
+          if (shouldFireToolHooks(tc.name)) {
+            for (const h of enabledHooks) {
+              if (h.event !== 'pre_tool_use') continue;
+              if (!matchTool(h.toolMatcher, tc.name)) continue;
+              const r = await runHook(h, hookVars);
+              if (r.code !== 0) {
+                const msg =
+                  (r.stderr.trim() || r.stdout.trim() || r.spawnError) ??
+                  `hook "${h.name}" 阻止了 ${tc.name}（exit ${r.code}）`;
+                throw new Error(`hook "${h.name}" 阻止了 ${tc.name}：${msg}`);
+              }
+            }
+          }
+
           resultText = await executeTool(tc.name, args, {
             conversationId: conversation.id,
             signal: controller.signal,
@@ -432,6 +501,21 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
           });
           tc.status = 'success';
           tc.result = resultText;
+
+          // Post-tool-use hooks. Run after a successful tool execution.
+          // Output is appended to the tool result text so the agent sees
+          // it in the next round-trip (auto-typecheck output, lint
+          // warnings, etc.). Errors here don't fail the tool — the tool
+          // already succeeded; the hook is supplementary.
+          if (shouldFireToolHooks(tc.name)) {
+            for (const h of enabledHooks) {
+              if (h.event !== 'post_tool_use') continue;
+              if (!matchTool(h.toolMatcher, tc.name)) continue;
+              const r = await runHook(h, hookVars);
+              resultText += formatHookOutputForAgent(h.name, r);
+            }
+            tc.result = resultText;
+          }
         } catch (e) {
           ok = false;
           resultText = (e as Error).message || '工具执行失败';
@@ -511,6 +595,29 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
       } finally {
         setStreaming(false);
         abortRef.current = null;
+        // Fire `stop` hooks. These run after the turn is fully done —
+        // perfect for "git status", desktop notifications, save-to-
+        // markdown, etc. We don't await them blocking-style because the
+        // user doesn't need to wait for hook output to interact again,
+        // but we DO use `void` so the runner schedules them.
+        if (conversation.mode === 'code') {
+          const stopHooks = useAppStore
+            .getState()
+            .hooks.filter((h) => h.enabled && h.event === 'stop');
+          if (stopHooks.length > 0) {
+            const vars: HookVars = {
+              tool: '',
+              workspace: useAppStore.getState().workspacePath ?? '',
+              file: '',
+              argsJson: '{}',
+            };
+            for (const h of stopHooks) {
+              void runHook(h, vars).catch((e) => {
+                console.warn(`[hook] ${h.name} failed:`, e);
+              });
+            }
+          }
+        }
       }
     },
     [runStream, conversation.id, patchLastMessage]

@@ -48,7 +48,7 @@ import {
 } from '@/lib/sync';
 import { useAppStore } from '@/store/useAppStore';
 import { downloadTextFile } from '@/lib/tauri';
-import type { MCPServer, Skill, SlashCommand, WorkMode } from '@/types';
+import type { Hook, MCPServer, Skill, SlashCommand, WorkMode } from '@/types';
 
 /** Bump when the bundle shape changes in a way older importers can't read. */
 export const BUNDLE_SCHEMA_VERSION = 1;
@@ -104,6 +104,12 @@ export interface AccountBundle {
    * export itself captures the complete picture at the moment it was made.
    */
   skills: Skill[];
+  /**
+   * User-configured automation hooks (Code-mode shell hooks). Always
+   * included even when the list is empty so the absence vs. presence
+   * is unambiguous on the receiving side.
+   */
+  hooks?: Hook[];
   settings: BundledSettings;
 }
 
@@ -159,6 +165,7 @@ export function buildAccountBundle(args?: {
     projects,
     artifacts,
     skills: s.skills,
+    hooks: s.hooks,
     settings,
   };
 }

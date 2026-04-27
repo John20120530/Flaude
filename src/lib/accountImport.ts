@@ -32,7 +32,7 @@
  * teammate's setup), we let them through after confirming.
  */
 import { useAppStore } from '@/store/useAppStore';
-import type { Skill, SlashCommand } from '@/types';
+import type { Hook, Skill, SlashCommand } from '@/types';
 import {
   type AccountBundle,
   type BundledSettings,
@@ -315,6 +315,25 @@ export function applyImportBundle(
       const map = new Map(cur.skills.map((sk) => [sk.id, sk]));
       for (const sk of newOrUpdated) map.set(sk.id, sk);
       return { ...cur, skills: [...map.values()] };
+    });
+  }
+
+  // Hooks: same LWW pattern as skills. Bundle field is optional (older
+  // bundles, pre-v0.1.28, don't have it) so default to [].
+  const hooksFromBundle: Hook[] = Array.isArray(bundle.hooks) ? bundle.hooks : [];
+  const hookExisting = new Map(s.hooks.map((h) => [h.id, h]));
+  const hookNewOrUpdated: Hook[] = [];
+  for (const h of hooksFromBundle) {
+    const existing = hookExisting.get(h.id);
+    if (!existing || h.updatedAt > existing.updatedAt) {
+      hookNewOrUpdated.push(h);
+    }
+  }
+  if (hookNewOrUpdated.length > 0) {
+    useAppStore.setState((cur) => {
+      const map = new Map(cur.hooks.map((h) => [h.id, h]));
+      for (const h of hookNewOrUpdated) map.set(h.id, h);
+      return { ...cur, hooks: [...map.values()] };
     });
   }
 

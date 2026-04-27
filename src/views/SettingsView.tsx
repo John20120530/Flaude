@@ -26,10 +26,13 @@ import {
   Eye,
   EyeOff,
   Upload,
+  Zap,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
 import { cn } from '@/lib/utils';
-import type { SlashCommand, MCPServer, Skill, WorkMode } from '@/types';
+import type { Hook, SlashCommand, MCPServer, Skill, WorkMode } from '@/types';
 import {
   parseEntries,
   serializeEntries,
@@ -116,6 +119,7 @@ export default function SettingsView() {
         <SkillsSection />
         <MCPSection />
         <SlashSection />
+        <HooksSection />
         <ToolsSection />
 
         <section>
@@ -1756,6 +1760,340 @@ function SlashForm({
           }
           disabled={!valid}
           className="btn-primary"
+        >
+          <Save className="w-3.5 h-3.5" />
+          保存
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Hooks (auto-run shell commands on agent events) — desktop only
+// ---------------------------------------------------------------------------
+//
+// Three event types:
+//   - pre_tool_use  → fires BEFORE matching tool; non-zero exit BLOCKS the
+//                     tool with the hook's stderr as the rejection reason
+//   - post_tool_use → fires AFTER matching tool; stdout/stderr appended to
+//                     the tool result so the agent sees lint/typecheck
+//                     output in the next round
+//   - stop          → fires when agent turn ends; output discarded (use
+//                     for desktop notifications, "git status", etc.)
+//
+// Substitution variables documented inline in the create/edit form.
+// ---------------------------------------------------------------------------
+
+const HOOK_EVENT_LABELS: Record<Hook['event'], string> = {
+  pre_tool_use: '工具调用前 (pre_tool_use)',
+  post_tool_use: '工具调用后 (post_tool_use)',
+  stop: '本轮结束时 (stop)',
+};
+
+const DEFAULT_HOOK: Omit<Hook, 'id' | 'createdAt' | 'updatedAt'> = {
+  name: '',
+  enabled: true,
+  event: 'post_tool_use',
+  toolMatcher: 'fs_write_file',
+  command: '',
+  timeoutMs: 30_000,
+};
+
+function HooksSection() {
+  const hooks = useAppStore((s) => s.hooks);
+  const addHook = useAppStore((s) => s.addHook);
+  const updateHook = useAppStore((s) => s.updateHook);
+  const deleteHook = useAppStore((s) => s.deleteHook);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="text-lg font-semibold flex items-center gap-2">
+          <Zap className="w-4 h-4" />
+          Hooks
+        </h2>
+        <button
+          onClick={() => {
+            setAdding(true);
+            setEditing(null);
+          }}
+          className="btn-ghost text-xs"
+          aria-label="添加 hook"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          添加 hook
+        </button>
+      </div>
+      <p className="text-sm text-claude-muted dark:text-night-muted mb-3">
+        在 Code 模式 agent 事件触发时自动跑 shell 命令。<strong>仅桌面版</strong>——浏览器版没有 shell 子系统。
+        可用变量：<code className="text-[11px]">$FLAUDE_TOOL</code> · <code className="text-[11px]">$FLAUDE_FILE</code> · <code className="text-[11px]">$FLAUDE_WORKSPACE</code> · <code className="text-[11px]">$FLAUDE_ARGS_JSON</code>。
+      </p>
+
+      <div className="space-y-2">
+        {hooks.length === 0 && !adding && (
+          <div className="p-4 rounded-md border border-dashed border-claude-border dark:border-night-border text-center text-sm text-claude-muted dark:text-night-muted">
+            还没有任何 hook。常见用法：写文件后跑 <code>pnpm tsc --noEmit</code>、本轮结束跑 <code>git status</code>、写代码前拒绝危险 <code>rm -rf</code>。
+          </div>
+        )}
+
+        {hooks.map((h) =>
+          editing === h.id ? (
+            <HookEditor
+              key={h.id}
+              initial={h}
+              onSave={(patch) => {
+                updateHook(h.id, patch);
+                setEditing(null);
+              }}
+              onCancel={() => setEditing(null)}
+              onDelete={() => {
+                deleteHook(h.id);
+                setEditing(null);
+              }}
+            />
+          ) : (
+            <HookRow
+              key={h.id}
+              hook={h}
+              onEdit={() => {
+                setEditing(h.id);
+                setAdding(false);
+              }}
+              onToggle={() => updateHook(h.id, { enabled: !h.enabled })}
+            />
+          ),
+        )}
+
+        {adding && (
+          <HookEditor
+            initial={DEFAULT_HOOK}
+            onSave={(patch) => {
+              addHook({ ...DEFAULT_HOOK, ...patch } as Omit<Hook, 'id' | 'createdAt' | 'updatedAt'>);
+              setAdding(false);
+            }}
+            onCancel={() => setAdding(false)}
+          />
+        )}
+      </div>
+    </section>
+  );
+}
+
+function HookRow({
+  hook,
+  onEdit,
+  onToggle,
+}: {
+  hook: Hook;
+  onEdit: () => void;
+  onToggle: () => void;
+}) {
+  return (
+    <div
+      className={cn(
+        'flex items-start gap-3 px-3 py-2 rounded-md border',
+        'border-claude-border dark:border-night-border',
+        !hook.enabled && 'opacity-60',
+      )}
+    >
+      <button
+        type="button"
+        onClick={onToggle}
+        title={hook.enabled ? '已启用 · 点击禁用' : '已禁用 · 点击启用'}
+        className={cn(
+          'mt-0.5 shrink-0 p-0.5 rounded hover:bg-black/[0.06] dark:hover:bg-white/[0.06]',
+          hook.enabled
+            ? 'text-emerald-600 dark:text-emerald-400'
+            : 'text-claude-muted dark:text-night-muted',
+        )}
+        aria-label={hook.enabled ? '禁用' : '启用'}
+      >
+        {hook.enabled ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+      </button>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 text-sm">
+          <span className="font-medium truncate">{hook.name || '(未命名)'}</span>
+          <span className="text-[11px] px-1.5 py-0.5 rounded bg-black/[0.05] dark:bg-white/[0.07] text-claude-muted dark:text-night-muted">
+            {HOOK_EVENT_LABELS[hook.event]}
+          </span>
+          {hook.event !== 'stop' && (
+            <span className="text-[11px] font-mono text-claude-muted dark:text-night-muted">
+              ↳ {hook.toolMatcher || '*'}
+            </span>
+          )}
+        </div>
+        <div className="text-xs font-mono text-claude-muted dark:text-night-muted mt-0.5 truncate">
+          {hook.command || '(无命令)'}
+        </div>
+      </div>
+      <button onClick={onEdit} className="btn-ghost text-xs shrink-0">
+        <Pencil className="w-3.5 h-3.5" />
+      </button>
+    </div>
+  );
+}
+
+function HookEditor({
+  initial,
+  onSave,
+  onCancel,
+  onDelete,
+}: {
+  initial: Omit<Hook, 'id' | 'createdAt' | 'updatedAt'> | Hook;
+  onSave: (patch: Partial<Hook>) => void;
+  onCancel: () => void;
+  onDelete?: () => void;
+}) {
+  const [name, setName] = useState(initial.name);
+  const [enabled, setEnabled] = useState(initial.enabled);
+  const [event, setEvent] = useState<Hook['event']>(initial.event);
+  const [toolMatcher, setToolMatcher] = useState(initial.toolMatcher);
+  const [command, setCommand] = useState(initial.command);
+  const [timeoutSec, setTimeoutSec] = useState(
+    Math.round((initial.timeoutMs || 30_000) / 1000),
+  );
+  const [helpOpen, setHelpOpen] = useState(false);
+
+  const canSave = name.trim() && command.trim();
+
+  const save = () => {
+    if (!canSave) return;
+    onSave({
+      name: name.trim(),
+      enabled,
+      event,
+      toolMatcher: event === 'stop' ? '' : toolMatcher.trim() || '*',
+      command: command.trim(),
+      timeoutMs: Math.max(1, timeoutSec) * 1000,
+    });
+  };
+
+  return (
+    <div className="p-3 rounded-md border border-claude-accent/40 bg-claude-accent/[0.03] dark:bg-claude-accent/[0.05] space-y-2">
+      <input
+        autoFocus
+        type="text"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="hook 名字（例：写后 typecheck）"
+        className="w-full px-2 py-1 text-sm rounded border border-claude-border dark:border-night-border bg-white dark:bg-night-bg focus:outline-none focus:ring-2 focus:ring-claude-accent/40"
+      />
+      <div className="flex items-center gap-2 text-xs">
+        <select
+          value={event}
+          onChange={(e) => setEvent(e.target.value as Hook['event'])}
+          className="px-2 py-1 rounded border border-claude-border dark:border-night-border bg-white dark:bg-night-bg"
+        >
+          <option value="pre_tool_use">{HOOK_EVENT_LABELS.pre_tool_use}</option>
+          <option value="post_tool_use">{HOOK_EVENT_LABELS.post_tool_use}</option>
+          <option value="stop">{HOOK_EVENT_LABELS.stop}</option>
+        </select>
+        {event !== 'stop' && (
+          <input
+            type="text"
+            value={toolMatcher}
+            onChange={(e) => setToolMatcher(e.target.value)}
+            placeholder="工具名（例：fs_write_file 或 fs_write_file|shell_exec 或 *）"
+            className="flex-1 px-2 py-1 font-mono rounded border border-claude-border dark:border-night-border bg-white dark:bg-night-bg focus:outline-none focus:ring-2 focus:ring-claude-accent/40"
+          />
+        )}
+      </div>
+      <textarea
+        value={command}
+        onChange={(e) => setCommand(e.target.value)}
+        placeholder={
+          event === 'stop'
+            ? '例：git -C $FLAUDE_WORKSPACE status --short'
+            : event === 'pre_tool_use'
+            ? '例：echo "$FLAUDE_FILE" | grep -v node_modules    （exit 1 阻止；exit 0 放行）'
+            : '例：pnpm tsc --noEmit    （或：pnpm prettier --write $FLAUDE_FILE）'
+        }
+        rows={3}
+        className="w-full px-2 py-1 text-sm font-mono rounded border border-claude-border dark:border-night-border bg-white dark:bg-night-bg focus:outline-none focus:ring-2 focus:ring-claude-accent/40 resize-y"
+      />
+      <div className="flex items-center gap-3 text-xs text-claude-muted dark:text-night-muted">
+        <label className="flex items-center gap-1">
+          超时
+          <input
+            type="number"
+            min={1}
+            max={600}
+            value={timeoutSec}
+            onChange={(e) => setTimeoutSec(parseInt(e.target.value, 10) || 30)}
+            className="w-14 px-1 py-0.5 rounded border border-claude-border dark:border-night-border bg-white dark:bg-night-bg"
+          />
+          秒
+        </label>
+        <label className="flex items-center gap-1">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+          />
+          启用
+        </label>
+        <button
+          type="button"
+          onClick={() => setHelpOpen((v) => !v)}
+          className="ml-auto inline-flex items-center gap-1 text-claude-muted dark:text-night-muted hover:text-claude-ink dark:hover:text-night-ink"
+        >
+          {helpOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+          帮助
+        </button>
+      </div>
+      {helpOpen && (
+        <div className="text-[11px] leading-relaxed bg-black/[0.03] dark:bg-white/[0.03] rounded p-2 space-y-1.5">
+          <div>
+            <strong>变量替换</strong>（在执行前替换，shell-quoted）：
+            <ul className="ml-4 mt-1 space-y-0.5">
+              <li><code>$FLAUDE_TOOL</code> — 触发的工具名（stop 事件下为空）</li>
+              <li><code>$FLAUDE_FILE</code> — fs_write_file 的 path 参数；其他工具为空</li>
+              <li><code>$FLAUDE_WORKSPACE</code> — 当前工作区根目录</li>
+              <li><code>$FLAUDE_ARGS_JSON</code> — 工具调用的全部参数（JSON 字符串）</li>
+            </ul>
+          </div>
+          <div>
+            <strong>事件语义</strong>：
+            <ul className="ml-4 mt-1 space-y-0.5">
+              <li><code>pre_tool_use</code>：exit 0 放行；exit ≠ 0 阻止工具，hook stderr 当作工具错误返回给 agent</li>
+              <li><code>post_tool_use</code>：工具成功后跑；stdout/stderr 拼到工具结果，agent 下一轮看到</li>
+              <li><code>stop</code>：每次 agent 回合结束时跑（背景执行，输出丢弃）</li>
+            </ul>
+          </div>
+          <div>
+            <strong>工具匹配</strong>（pre/post 事件）：精确匹配；多个用 <code>|</code> 分隔；<code>*</code> 匹配任意工具。
+          </div>
+          <div>
+            <strong>shell 包装</strong>：Windows 用 <code>cmd /c</code>，其他用 <code>sh -c</code>。命令可以用管道、重定向等 shell 特性。
+          </div>
+        </div>
+      )}
+      <div className="flex items-center gap-2">
+        {onDelete && (
+          <button
+            type="button"
+            onClick={onDelete}
+            className="text-xs text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
+          >
+            删除
+          </button>
+        )}
+        <div className="flex-1" />
+        <button
+          type="button"
+          onClick={onCancel}
+          className="btn-ghost text-xs"
+        >
+          取消
+        </button>
+        <button
+          type="button"
+          onClick={save}
+          disabled={!canSave}
+          className="btn-primary text-xs disabled:opacity-50"
         >
           <Save className="w-3.5 h-3.5" />
           保存
