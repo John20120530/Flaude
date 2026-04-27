@@ -133,13 +133,13 @@ describe('truncate', () => {
 // -----------------------------------------------------------------------------
 
 interface MockEntry {
-  body: unknown;
+  body?: unknown;
   status?: number;
   text?: string;
 }
 
 function makeFetchMock(routes: Record<string, MockEntry>) {
-  return vi.fn(async (input: RequestInfo | URL) => {
+  return vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     // Find the first route whose key is a prefix of the URL. Lets tests
     // write `https://api.github.com/repos/foo/bar/license` once and

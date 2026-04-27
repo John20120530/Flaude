@@ -35,6 +35,7 @@ import {
 import chat from './chat';
 import type { AppContext, Env } from './env';
 import mcpDemo from './mcpDemo';
+import mcpsSearch from './mcpsSearch';
 import { requireAuth } from './middleware';
 import skillsSearch from './skillsSearch';
 import sync from './sync';
@@ -260,6 +261,15 @@ app.route('/', mcpDemo);
 // endpoint, not chat's blanket auth (which would fire first and 401 us).
 // -----------------------------------------------------------------------------
 app.route('/', skillsSearch);
+
+// -----------------------------------------------------------------------------
+// MCP marketplace federated search (./mcpsSearch.ts).
+//   GET /api/mcps/search?q=<keyword>
+//
+// Federates 4 sources: PulseMCP / Glama / npm registry / GitHub Code Search.
+// Same mount-before-chat rule as siblings above.
+// -----------------------------------------------------------------------------
+app.route('/', mcpsSearch);
 
 // -----------------------------------------------------------------------------
 // Chat proxy + /usage (mounted from ./chat.ts — requireAuth is applied inside
