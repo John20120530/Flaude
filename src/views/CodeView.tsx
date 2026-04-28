@@ -137,6 +137,31 @@ export default function CodeView() {
     }
   }, [conversationId, conversation, newConversation, navigate, setActiveConversation]);
 
+  // Restore the conversation's bound workspace when the user clicks back
+  // to it from the sidebar. Each Code conversation stamps the active
+  // workspace at creation time (see store.newConversation), so re-opening
+  // an old conversation should pop you back to its folder — otherwise
+  // the agent's previous file references become invalid.
+  //
+  // Guards:
+  //   - only fires when conversation actually changes (not on every render)
+  //   - skips if the conversation has no workspacePath (legacy) — leaves
+  //     the global state alone in that case rather than clearing
+  //   - skips if it's already the same path (no-op idempotency)
+  useEffect(() => {
+    if (!conversation || conversation.mode !== 'code') return;
+    const bound = conversation.workspacePath ?? '';
+    const current = workspacePath || '';
+    if (bound && bound !== current) {
+      setWorkspacePath(bound);
+    }
+    // workspacePath intentionally NOT in deps — we only react to the
+    // conversation switching, not to subsequent workspace changes within
+    // the same conversation (which only happen via openWorkspace, which
+    // already spawns a new conversation).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversation?.id]);
+
   const [bottomTab, setBottomTab] = useState<'tools' | 'terminal' | 'git' | 'background'>(
     'tools'
   );

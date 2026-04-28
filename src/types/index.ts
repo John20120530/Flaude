@@ -56,6 +56,21 @@ export interface Conversation {
   mode: WorkMode;
   modelId: string;
   projectId?: string;
+  /**
+   * For Code-mode conversations: the workspace folder path that was
+   * active when the conversation started. Persisted with the conversation
+   * so clicking back to it in the sidebar restores that workspace, not
+   * whichever folder happens to be open right now. The workspace switch
+   * UX in CodeView already creates a fresh conversation when the user
+   * picks a new folder (v0.1.41), so this binding is one-to-one.
+   *
+   * Undefined means the conversation pre-dates this binding (legacy)
+   * or it's a non-Code conversation. We intentionally don't auto-clear
+   * the global workspace when a non-Code conversation is opened —
+   * users may switch to a Chat conversation and want their open folder
+   * to stay open in the background for when they switch back.
+   */
+  workspacePath?: string;
   messages: Message[];
   createdAt: number;
   updatedAt: number;

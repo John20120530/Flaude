@@ -136,6 +136,31 @@ describe('scoreOf', () => {
     const triple = scoreOf(r({ sources: ['npm', 'pulsemcp', 'glama'] }));
     expect(triple - single).toBeGreaterThan(0);
   });
+  it('HTTP endpoint outranks stdio-tauri within the same tier', () => {
+    const http = scoreOf(r({ trustTier: 'popular', endpointType: 'http' }));
+    const stdio = scoreOf(r({ trustTier: 'popular', endpointType: 'stdio-tauri' }));
+    expect(http).toBeGreaterThan(stdio);
+  });
+  it('stdio-tauri outranks stdio-instructions within the same tier', () => {
+    const tauri = scoreOf(r({ trustTier: 'popular', endpointType: 'stdio-tauri' }));
+    const manual = scoreOf(
+      r({ trustTier: 'popular', endpointType: 'stdio-instructions' }),
+    );
+    expect(tauri).toBeGreaterThan(manual);
+  });
+  it('endpoint-type bonus does not flip across tiers (official stdio > popular http)', () => {
+    const officialStdio = scoreOf(
+      r({ trustTier: 'official', endpointType: 'stdio-instructions' }),
+    );
+    const popularHttp = scoreOf(
+      r({
+        trustTier: 'popular',
+        endpointType: 'http',
+        signals: { isOfficialPublisher: false, githubStars: 5000, npmWeeklyDownloads: 50000 },
+      }),
+    );
+    expect(officialStdio).toBeGreaterThan(popularHttp);
+  });
 });
 
 // =============================================================================
