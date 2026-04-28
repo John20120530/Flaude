@@ -87,10 +87,26 @@ export function composeSystemPrompt(options: {
     );
     if (active.length > 0) {
       const catalogue = active
-        .map(
-          (s) =>
-            `### ${s.name}（${s.title}）\n**适用场景**：${s.description}\n\n${s.instructions.trim()}`
-        )
+        .map((s) => {
+          // Base block: name + when-to-trigger + the SKILL.md body.
+          const head = `### ${s.name}（${s.title}）\n**适用场景**：${s.description}\n\n${s.instructions.trim()}`;
+          // If the skill bundles auxiliary files, append a manifest so
+          // the model knows what's available without us inlining all
+          // the contents (which can be tens of KB per skill). The
+          // model reads them on demand via the `read_skill_asset`
+          // tool, only when its request actually matches one.
+          if (s.assets && s.assets.length > 0 && mode === 'code') {
+            const manifest = s.assets
+              .map((a) => `  - ${a.path} (${formatAssetSize(a.size)})`)
+              .join('\n');
+            return (
+              head +
+              '\n\n**捆绑文件**（按需用 `read_skill_asset` 工具读取，' +
+              `skill_name=\`${s.name}\`）：\n${manifest}`
+            );
+          }
+          return head;
+        })
         .join('\n\n---\n\n');
       parts.push(
         [
@@ -123,6 +139,15 @@ export function composeSystemPrompt(options: {
   }
 
   return parts.join('\n');
+}
+
+/** Format a byte count for the skill asset manifest. Compact 3-digit
+ *  output: `12B`, `1.4KB`, `47KB`. The agent only needs a rough sense
+ *  of "how big" to decide whether reading is worth a tool call. */
+function formatAssetSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 100 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${Math.round(bytes / 1024)}KB`;
 }
 
 function truncateSources(

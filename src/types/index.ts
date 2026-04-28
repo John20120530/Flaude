@@ -308,6 +308,30 @@ export interface TodoItem {
   status: TodoStatus;
 }
 
+/**
+ * A single auxiliary file bundled with a Skill at install time.
+ *
+ * Real-world Claude Skills are folders, not single files — they ship
+ * SKILL.md alongside `templates/`, `scripts/`, `config/`, etc. The
+ * SKILL.md body references those paths directly (e.g. "see
+ * templates/alert.md") and the agent is expected to read them on
+ * demand. Without bundled assets, those references dangle.
+ *
+ * Bundled at install time (Worker walks the GitHub tree, fetches each
+ * text file, ships the lot in one response) and stored locally with
+ * the skill so subsequent reads are offline-fast. Read by the
+ * `read_skill_asset` builtin tool when the agent quotes a path.
+ */
+export interface SkillAsset {
+  /** Relative path within the skill folder, e.g. "templates/alert.md". */
+  path: string;
+  /** UTF-8 text content. Binaries are filtered at install time. */
+  content: string;
+  /** Bytes (UTF-8). Stored explicitly so we can render size hints in
+   *  the asset manifest without re-encoding the content. */
+  size: number;
+}
+
 export interface Skill {
   id: string;
   /** Short kebab-case identifier, e.g. "code-review". Shown to the model. */
@@ -329,6 +353,18 @@ export interface Skill {
   /** User can toggle this off without deleting it. */
   enabled: boolean;
   builtin?: boolean;
+  /**
+   * Auxiliary files bundled with the skill. Optional — user-authored
+   * skills (typed into the form) and pre-v0.1.44 skills won't have any.
+   * Skills installed from the marketplace get whatever's in the same
+   * folder as SKILL.md, subject to size/extension/depth caps applied
+   * server-side at install time.
+   *
+   * The agent reads these via the `read_skill_asset` tool — the system
+   * prompt lists their paths in a manifest so the agent knows what to
+   * ask for. Total bundle is capped at ~1MB to keep store size sane.
+   */
+  assets?: SkillAsset[];
   createdAt: number;
   updatedAt: number;
 }

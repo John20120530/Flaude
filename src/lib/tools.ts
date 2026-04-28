@@ -54,6 +54,17 @@ export interface ToolContext {
    * PlanApprovalResultLite below.
    */
   spawnSubtask?: (req: SubagentRequestLite) => Promise<SubagentResultLite>;
+  /**
+   * Hook for `read_skill_asset`. Returns the auxiliary file bundled
+   * with an installed Skill at install time, or `null` if the skill
+   * isn't installed / the asset path doesn't match. Injected from the
+   * chat hook so tools.ts doesn't reach into useAppStore directly
+   * (same cycle-avoidance pattern as the other hooks above).
+   */
+  readSkillAsset?: (args: {
+    skillName: string;
+    assetPath: string;
+  }) => { content: string; size: number } | null;
 }
 
 export interface SubagentRequestLite {
@@ -711,6 +722,79 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
         result.finalText +
         truncationNote
       );
+    },
+  },
+
+  // --- read_skill_asset --------------------------------------------------
+  // Reads a file bundled with an installed Skill. Real-world Claude
+  // Skills are folders (SKILL.md + templates/ + scripts/ + config/) and
+  // the SKILL.md body usually quotes paths relative to that folder
+  // ("see templates/alert.md"). v0.1.44 ships those auxiliary files at
+  // install time, and this tool exposes them to the agent on demand.
+  //
+  // Why on-demand instead of stuffing every asset into the system
+  // prompt: a "monitor healthcare companies" skill might bundle 20
+  // template files, only 1-2 of which apply to any given user request.
+  // Inlining all 20 burns ~20K tokens for nothing. The system prompt
+  // lists asset paths + sizes (manifest only); the agent reads the
+  // ones it needs.
+  {
+    name: 'read_skill_asset',
+    description:
+      '读取已安装 Skill 的捆绑文件（templates/scripts/config 等）。' +
+      '当 SKILL.md 引用某个相对路径（如 "templates/alert.md"）、' +
+      '而你需要看那个文件的内容时调用。文件已在安装时下载到本机，' +
+      '不会发起网络请求。可用的 skill 名称和 asset 路径在系统提示的 Skill 清单里列出。',
+    parameters: {
+      type: 'object',
+      properties: {
+        skill_name: {
+          type: 'string',
+          description: 'Skill 的 `name` 字段（不是 title），如 "healthcare-monitor"',
+        },
+        asset_path: {
+          type: 'string',
+          description:
+            '相对 skill 根目录的路径，如 "templates/alert.md" 或 "config/settings.json"',
+        },
+      },
+      required: ['skill_name', 'asset_path'],
+    },
+    source: 'builtin',
+    modes: ['code'],
+    handler: async ({ skill_name, asset_path }, { readSkillAsset }) => {
+      if (!readSkillAsset) {
+        throw new Error(
+          'read_skill_asset 在当前上下文不可用（缺少 readSkillAsset 钩子）。',
+        );
+      }
+      if (typeof skill_name !== 'string' || !skill_name.trim()) {
+        throw new Error('skill_name 必须是非空字符串。');
+      }
+      if (typeof asset_path !== 'string' || !asset_path.trim()) {
+        throw new Error('asset_path 必须是非空字符串。');
+      }
+      // Normalize path: strip a leading slash, collapse `./`, reject `..`
+      // segments. Defense in depth even though all the asset paths come
+      // from a server-controlled bundle — a future "user adds custom
+      // assets" feature would inherit the same guard.
+      const cleaned = asset_path.replace(/^\/+/, '').replace(/^\.\/+/, '');
+      if (cleaned.split('/').some((seg) => seg === '..')) {
+        throw new Error('asset_path 不能包含 ".." 段。');
+      }
+      const result = readSkillAsset({
+        skillName: skill_name.trim(),
+        assetPath: cleaned,
+      });
+      if (!result) {
+        throw new Error(
+          `找不到 skill「${skill_name}」中的资产「${cleaned}」。` +
+            '检查 skill 是否已安装、路径是否拼写正确，或在系统提示的 Skill 清单里看可用路径。',
+        );
+      }
+      // Prepend a one-line header so the agent knows it's looking at
+      // a specific file (helps with multi-asset reasoning).
+      return `=== ${cleaned} (${result.size} bytes) ===\n${result.content}`;
     },
   },
 ];
