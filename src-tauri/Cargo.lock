@@ -989,7 +989,7 @@ dependencies = [
 
 [[package]]
 name = "flaude-app"
-version = "0.1.44"
+version = "0.1.45"
 dependencies = [
  "calamine",
  "pdf-extract",
