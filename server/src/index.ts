@@ -37,6 +37,7 @@ import type { AppContext, Env } from './env';
 import mcpDemo from './mcpDemo';
 import mcpsSearch from './mcpsSearch';
 import { requireAuth } from './middleware';
+import skillsBundle from './skillsBundle';
 import skillsSearch from './skillsSearch';
 import sync from './sync';
 import tools from './tools';
@@ -270,6 +271,16 @@ app.route('/', skillsSearch);
 // Same mount-before-chat rule as siblings above.
 // -----------------------------------------------------------------------------
 app.route('/', mcpsSearch);
+
+// -----------------------------------------------------------------------------
+// Skills folder-bundle fetch (./skillsBundle.ts).
+//   GET /api/skills/fetch-bundle?rawUrl=<encoded SKILL.md raw URL>
+//
+// Walks the repo tree, returns SKILL.md + sibling text files in one shot
+// so the client can install a skill folder (templates/scripts/config) in
+// a single network round-trip. Same mount-before-chat rule.
+// -----------------------------------------------------------------------------
+app.route('/', skillsBundle);
 
 // -----------------------------------------------------------------------------
 // Chat proxy + /usage (mounted from ./chat.ts — requireAuth is applied inside

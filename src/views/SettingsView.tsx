@@ -34,7 +34,14 @@ import {
 } from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
 import { cn } from '@/lib/utils';
-import type { Hook, SlashCommand, MCPServer, Skill, WorkMode } from '@/types';
+import type {
+  Hook,
+  SlashCommand,
+  MCPServer,
+  Skill,
+  SkillAsset,
+  WorkMode,
+} from '@/types';
 import {
   parseEntries,
   serializeEntries,
@@ -69,6 +76,7 @@ import {
 import { MCP_MARKET, type McpMarketEntry } from '@/config/mcpMarket';
 import { parseSkillMd } from '@/lib/skillsImport';
 import { searchSkillsMarket } from '@/lib/skillsSearch';
+import { fetchSkillBundle } from '@/lib/skillsBundle';
 import {
   searchMcpsMarket,
   type McpSearchResult,
@@ -1268,6 +1276,14 @@ function SkillsSection() {
                         内置
                       </span>
                     )}
+                    {sk.assets && sk.assets.length > 0 && (
+                      <span
+                        className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-700 dark:text-blue-400"
+                        title={`捆绑 ${sk.assets.length} 个文件，可由 read_skill_asset 工具按需读取`}
+                      >
+                        {sk.assets.length} 个文件
+                      </span>
+                    )}
                     <div className="flex gap-1">
                       {sk.modes.length === 0 ? (
                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/10">
@@ -1288,6 +1304,9 @@ function SkillsSection() {
                   <div className="text-xs text-claude-muted dark:text-night-muted mt-1">
                     {sk.description}
                   </div>
+                  {sk.assets && sk.assets.length > 0 && (
+                    <SkillAssetList assets={sk.assets} />
+                  )}
                 </div>
                 <div className="flex gap-1 shrink-0">
                   <button
@@ -1322,6 +1341,79 @@ function SkillsSection() {
       </div>
     </section>
   );
+}
+
+/**
+ * Collapsible asset viewer for a Skill — lists each bundled file with
+ * its size, click any row to peek at the content. Mirrors what the
+ * agent will see via `read_skill_asset`, so users can sanity-check the
+ * bundle before relying on the skill.
+ */
+function SkillAssetList({ assets }: { assets: SkillAsset[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const [openPath, setOpenPath] = useState<string | null>(null);
+
+  const totalSize = assets.reduce((s, a) => s + a.size, 0);
+
+  if (!expanded) {
+    return (
+      <button
+        type="button"
+        onClick={() => setExpanded(true)}
+        className="mt-1.5 text-[11px] text-claude-muted dark:text-night-muted hover:text-claude-ink dark:hover:text-night-ink inline-flex items-center gap-1"
+      >
+        <ChevronRight className="w-3 h-3" />
+        展开 {assets.length} 个捆绑文件 · 共 {fmtBytes(totalSize)}
+      </button>
+    );
+  }
+
+  const opened = openPath ? assets.find((a) => a.path === openPath) : null;
+
+  return (
+    <div className="mt-1.5 space-y-1">
+      <button
+        type="button"
+        onClick={() => {
+          setExpanded(false);
+          setOpenPath(null);
+        }}
+        className="text-[11px] text-claude-muted dark:text-night-muted hover:text-claude-ink dark:hover:text-night-ink inline-flex items-center gap-1"
+      >
+        <ChevronDown className="w-3 h-3" />
+        折叠（{assets.length} 个文件 · {fmtBytes(totalSize)}）
+      </button>
+      <div className="border border-claude-border/50 dark:border-night-border/50 rounded text-[11px]">
+        {assets.map((a) => (
+          <button
+            key={a.path}
+            type="button"
+            onClick={() => setOpenPath(openPath === a.path ? null : a.path)}
+            className={cn(
+              'w-full px-2 py-1 flex items-center justify-between gap-2 hover:bg-black/[0.03] dark:hover:bg-white/[0.04] text-left',
+              openPath === a.path && 'bg-black/[0.05] dark:bg-white/[0.06]',
+            )}
+          >
+            <code className="font-mono truncate">{a.path}</code>
+            <span className="text-claude-muted dark:text-night-muted shrink-0">
+              {fmtBytes(a.size)}
+            </span>
+          </button>
+        ))}
+      </div>
+      {opened && (
+        <pre className="text-[10px] font-mono whitespace-pre-wrap break-words bg-black/[0.04] dark:bg-white/[0.04] rounded p-2 max-h-48 overflow-y-auto">
+          {opened.content}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+function fmtBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 100 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${Math.round(bytes / 1024)}KB`;
 }
 
 function SkillForm({
@@ -2731,17 +2823,19 @@ function SkillsMarketRow({
 async function installMarketSkill(
   entry: SkillsMarketEntry,
   addSkill: (s: Omit<Skill, 'id' | 'createdAt' | 'updatedAt'>) => string,
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  let raw: string;
-  try {
-    const r = await fetch(entry.rawUrl);
-    if (!r.ok) return { ok: false, error: `HTTP ${r.status}` };
-    raw = await r.text();
-  } catch (e) {
-    return { ok: false, error: (e as Error).message };
-  }
-  const parsed = parseSkillMd(raw);
-  if (!parsed.ok) return { ok: false, error: parsed.error };
+): Promise<{ ok: true; assetCount: number } | { ok: false; error: string }> {
+  // v0.1.44: install path goes through the Worker's /api/skills/fetch-bundle
+  // endpoint, which walks the SKILL.md's parent folder and ships back every
+  // text file under it (subject to size/depth/extension caps) — so a skill
+  // that references "templates/alert.md" actually has that template
+  // available locally for the agent's `read_skill_asset` tool.
+  //
+  // Pre-v0.1.44 path was: client fetches SKILL.md raw → parses frontmatter
+  // locally → addSkill. That worked but missed the folder structure that
+  // most real-world Claude Skills use; references to `scripts/monitor.py`
+  // or `config/companies.json` would then dangle.
+  const bundle = await fetchSkillBundle(entry.rawUrl);
+  if (!bundle.ok) return { ok: false, error: bundle.error };
 
   // Compose the Flaude Skill. Title comes from the marketplace manifest
   // (Chinese-friendly); name + description come from upstream
@@ -2753,14 +2847,15 @@ async function installMarketSkill(
     `[${entry.source}](${entry.sourceUrl}) · ${entry.license}*\n`;
 
   addSkill({
-    name: parsed.parsed.name,
+    name: bundle.name,
     title: entry.title,
-    description: parsed.parsed.description,
-    instructions: parsed.parsed.body + attribution,
+    description: bundle.description,
+    instructions: bundle.body + attribution,
     modes: entry.modes,
     enabled: true,
+    assets: bundle.assets.length > 0 ? bundle.assets : undefined,
   });
-  return { ok: true };
+  return { ok: true, assetCount: bundle.assets.length };
 }
 
 // ---------------------------------------------------------------------------

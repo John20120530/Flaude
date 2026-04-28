@@ -510,6 +510,18 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
                 context: req.context,
               });
             },
+            readSkillAsset: ({ skillName, assetPath }) => {
+              // Look up the skill by `name` (not title — the agent
+              // sees `name` in the system-prompt manifest). Then find
+              // the asset by relative path. Returns null on miss; the
+              // tool wrapper turns null into a clear error message.
+              const skills = useAppStore.getState().skills;
+              const skill = skills.find((s) => s.name === skillName);
+              if (!skill?.assets) return null;
+              const asset = skill.assets.find((a) => a.path === assetPath);
+              if (!asset) return null;
+              return { content: asset.content, size: asset.size };
+            },
           });
           tc.status = 'success';
           tc.result = resultText;
