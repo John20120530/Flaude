@@ -109,7 +109,7 @@ export default function SettingsView() {
   const [activeTab, setActiveTab] = useState<SettingsTab>('general');
 
   return (
-    <div className="flex-1 overflow-y-auto no-scrollbar">
+    <div className="flex-1 overflow-y-auto">
       <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
         <div>
           <h1 className="text-2xl font-semibold">设置</h1>
@@ -120,20 +120,22 @@ export default function SettingsView() {
 
         {/* Tab bar.
             Sticky-top so the tabs stay visible as the user scrolls long
-            sub-pages (Skills section can have many entries). The
-            sticky offset is `top-0` because Settings has no app-level
-            header within this scroll container.
-            v0.1.45: outer container uses `no-scrollbar` to hide the
-            page scrollbar entirely. The previous fix (drop the sticky
-            div's `-mx-6 px-6`) didn't actually move the scrollbar
-            visually because the outer container's `overflow-y-auto`
-            still reserves a 10px gutter (per index.css scrollbar
-            styling) that visually intrudes into the sticky bar's
-            right edge. Hiding the scrollbar leaves wheel/trackpad
-            scroll fully functional and removes the "track" artifact
-            for good. */}
+            sub-pages (Skills section can have many entries).
+
+            v0.1.45 mistake: I removed the outer page scrollbar entirely
+            via `.no-scrollbar`, which was too aggressive — users
+            actually want the page scrollbar to remain (long sub-pages
+            need it). The real artifact was a tiny *horizontal*
+            scrollbar inside the `<nav>` element itself, caused by
+            `overflow-x-auto` reserving track space even when the tabs
+            don't actually overflow.
+            v0.1.47: target only the nav's horizontal scrollbar with
+            `no-scrollbar`. Outer page scrolling is back to default. */}
         <div className="sticky top-0 z-10 pb-3 bg-white dark:bg-night-bg border-b border-claude-border dark:border-night-border">
-          <nav className="flex gap-1 -mb-px overflow-x-auto" aria-label="设置分类">
+          <nav
+            className="flex gap-1 -mb-px overflow-x-auto no-scrollbar"
+            aria-label="设置分类"
+          >
             {TAB_DEFINITIONS.map((tab) => (
               <button
                 key={tab.id}
@@ -1723,7 +1725,23 @@ function MCPRow({
             >
               {server.transport === 'stdio' ? 'stdio' : 'HTTP'}
             </span>
-            <div className={cn('flex items-center gap-1 text-xs', statusColor)}>
+            <div
+              className={cn('flex items-center gap-1 text-xs', statusColor)}
+              title={
+                // v0.1.47: hover the status badge to reveal the
+                // diagnostic without having to scroll. Falls back to a
+                // generic note when lastError is empty so the tooltip
+                // never silently does nothing.
+                server.status === 'error'
+                  ? server.lastError ||
+                    '连接失败（无具体错误信息）。点「连接」按钮重试，或看下面的红色错误框。'
+                  : server.status === 'connected'
+                    ? '已连接，工具已注册到工具列表'
+                    : server.status === 'connecting'
+                      ? '正在握手 + 列工具…'
+                      : '未连接'
+              }
+            >
               <StatusIcon
                 className={cn(
                   'w-3 h-3',
@@ -1798,10 +1816,18 @@ function MCPRow({
           <Trash2 className="w-3.5 h-3.5" />
         </button>
       </div>
-      {server.lastError && (
+      {/* v0.1.47: render whenever status is 'error', not gated on
+          `lastError` being truthy. The empty-string case happened in
+          practice (some throws don't carry a useful Error.message),
+          producing a row that just says "error" with no recovery
+          path visible. Now we always show the box + diagnostic hints
+          when status is error, falling back to a generic message. */}
+      {server.status === 'error' && (
         <div className="mt-2 text-xs text-red-500 bg-red-500/5 border border-red-500/20 rounded px-2 py-1.5 break-words">
           <div className="font-medium">连接失败</div>
-          <div className="font-mono text-[11px] mt-0.5">{server.lastError}</div>
+          <div className="font-mono text-[11px] mt-0.5">
+            {server.lastError || '（无具体错误信息——可能是子进程立刻崩溃或返回了空错误）'}
+          </div>
           {/* Inline hints for the most common stdio failure modes —
               users see the cryptic underlying error and need a nudge
               about what to actually do next. */}
@@ -1812,9 +1838,24 @@ function MCPRow({
           )}
           {server.transport === 'stdio' &&
             isTauri() &&
-            /npx|ENOENT|spawn|not found/i.test(server.lastError) && (
+            /npx|ENOENT|spawn|not found/i.test(server.lastError ?? '') && (
               <div className="mt-1 text-[11px] not-italic">
                 💡 看起来像 npx / Node.js 不在 PATH。装 Node.js LTS 后重启 Flaude（PATH 是启动时读的）。
+              </div>
+            )}
+          {/* Filesystem MCP gets `.` as default arg — that resolves to
+              Tauri's spawn cwd which is the app bundle, not the user's
+              workspace. The server then can't access anything useful
+              and crashes. Tell users to edit args. */}
+          {server.transport === 'stdio' &&
+            isTauri() &&
+            server.stdioConfig?.args?.some((a) =>
+              /server-filesystem/.test(a),
+            ) &&
+            server.stdioConfig?.args?.includes('.') && (
+              <div className="mt-1 text-[11px] not-italic">
+                💡 Filesystem MCP 默认参数是 `.`，但 Tauri 子进程的工作目录不是你的桌面/工作区——server 拿不到能用的目录就立刻崩。
+                目前的 workaround：删掉这条，回 MCP 市场展开详情后把 args 里的 `.` 改成绝对路径（如 `C:\Users\你的名字`），再装。
               </div>
             )}
           {server.transport === 'stdio' &&
@@ -3173,13 +3214,43 @@ function McpMarketSection() {
                   if (keys.length > 0 && token) {
                     env[keys[0]!] = token;
                   }
+
+                  // v0.1.47: Filesystem MCP requires a directory argument.
+                  // The manifest defaults to `.`, but Tauri's spawn cwd is
+                  // the app bundle (not the user's workspace), so the
+                  // server starts with a useless dir and crashes immediately
+                  // → "error" status, no recovery path. Detect this case
+                  // and prompt for a folder before installing.
+                  let resolvedArgs = entry.stdioCommand.args;
+                  const isFilesystemMcp = resolvedArgs.some((a) =>
+                    /server-filesystem/.test(a),
+                  );
+                  if (isFilesystemMcp && resolvedArgs.includes('.')) {
+                    try {
+                      const picked = await pickFolder(
+                        '选择 Filesystem MCP 要暴露的目录（agent 能读/写这个目录下的文件）',
+                      );
+                      if (!picked) {
+                        // User cancelled — don't install at all.
+                        alert('安装已取消（Filesystem MCP 必须指定一个目录）。');
+                        return;
+                      }
+                      resolvedArgs = resolvedArgs.map((a) =>
+                        a === '.' ? picked : a,
+                      );
+                    } catch (e) {
+                      alert(`选择目录失败：${(e as Error).message}`);
+                      return;
+                    }
+                  }
+
                   const id = addMCPServer({
                     name: entry.title,
                     transport: 'stdio',
                     url: '', // unused for stdio; kept for `installedUrls` shape
                     stdioConfig: {
                       command: entry.stdioCommand.command,
-                      args: entry.stdioCommand.args,
+                      args: resolvedArgs,
                       env: Object.keys(env).length > 0 ? env : undefined,
                     },
                     enabled: true,
