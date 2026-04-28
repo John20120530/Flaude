@@ -611,12 +611,21 @@ export const useAppStore = create<AppState>()(
           get().modelByMode[activeMode] ?? DEFAULT_MODEL_BY_MODE[activeMode];
         const id = uid('conv');
         const now = Date.now();
+        // Stamp the currently-open workspace onto Code conversations so
+        // re-opening one later restores its folder. v0.1.41 already
+        // creates a fresh conversation whenever the workspace switches,
+        // so this binding stays one-to-one. Non-Code conversations
+        // intentionally leave workspacePath undefined — they don't care
+        // about a folder context.
+        const workspacePath =
+          activeMode === 'code' ? get().workspacePath || undefined : undefined;
         const conv: Conversation = {
           id,
           title: '新对话',
           mode: activeMode,
           modelId,
           projectId: projectId ?? undefined,
+          workspacePath,
           messages: [],
           createdAt: now,
           updatedAt: now,

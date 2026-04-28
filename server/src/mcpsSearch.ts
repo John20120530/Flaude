@@ -98,6 +98,24 @@ const OFFICIAL_NPM_PREFIXES = [
 // Anyone publishing under `modelcontextprotocol/servers` is also 🟢.
 const OFFICIAL_GITHUB_REPOS = new Set(['modelcontextprotocol/servers']);
 
+// npm packages that appear in MCP-related searches but are NOT actually
+// runnable MCP servers — installing them with `npx -y <pkg>` either does
+// nothing (libraries) or fails because they have no `bin` field. Keeping
+// them in search results just produces broken installs that show "error"
+// on the connect button. v0.1.43 fix.
+//
+// Heuristics-based filtering (e.g. drop names ending in `-sdk`) is
+// tempting but produces false negatives — a real server might
+// legitimately have "sdk" in its name. So we hardcode the known bad
+// ones from the @modelcontextprotocol scope. Add to this list as more
+// non-server packages surface in search.
+const NON_SERVER_NPM_PACKAGES = new Set<string>([
+  '@modelcontextprotocol/sdk',
+  '@modelcontextprotocol/inspector',
+  '@modelcontextprotocol/create-server',
+  '@modelcontextprotocol/create-python-server',
+]);
+
 // Hardcoded list of well-known `@modelcontextprotocol/*` packages. None of
 // the four search engines (PulseMCP / Glama / npm / GitHub) reliably surface
 // these on page 1 for keyword queries — npm ranks `mongodb-memory-server`
@@ -727,6 +745,15 @@ function mergeAndScore(buckets: BucketSet): McpSearchResult[] {
     ...buckets.github,
   ];
   for (const p of allParts) {
+    // Drop known non-server npm packages early so their parts don't
+    // contaminate any group's merged signals (and so the per-id Map
+    // stays free of unusable entries).
+    if (
+      p.npmPackageName &&
+      NON_SERVER_NPM_PACKAGES.has(p.npmPackageName)
+    ) {
+      continue;
+    }
     const arr = groups.get(p.id) ?? [];
     arr.push(p);
     groups.set(p.id, arr);
@@ -876,11 +903,24 @@ function scoreOf(r: McpSearchResult): number {
   // Tier weights are large enough that they strictly dominate within-tier
   // signal scores. An obscure official package always beats the most
   // popular unaudited one — the trust gate is intentionally absolute, not
-  // a soft preference. Within a tier, stars + downloads + cross-source
-  // presence break ties.
+  // a soft preference. Within a tier, endpoint type + stars + downloads
+  // + cross-source presence break ties.
   let s = 0;
   if (r.trustTier === 'official') s += 1_000_000;
   else if (r.trustTier === 'popular') s += 10_000;
+
+  // Endpoint-type preference (within tier): HTTP > stdio-tauri >
+  // stdio-instructions. Reasoning:
+  //   - HTTP works on web AND desktop, no Node.js / npm requirement,
+  //     no env-var fiddling for the common case → highest yield per
+  //     install click.
+  //   - stdio-tauri is one-click on desktop only.
+  //   - stdio-instructions requires the user to copy a command and run
+  //     it themselves → low completion rate, demote.
+  if (r.endpointType === 'http') s += 6_000;
+  else if (r.endpointType === 'stdio-tauri') s += 1_000;
+  // stdio-instructions: no bonus.
+
   s += Math.min(r.signals.githubStars ?? 0, 5000);
   s += Math.min((r.signals.npmWeeklyDownloads ?? 0) / 10, 5000);
   s += r.sources.length * 50; // small cross-source bonus

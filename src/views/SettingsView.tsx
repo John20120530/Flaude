@@ -114,8 +114,15 @@ export default function SettingsView() {
             Sticky-top so the tabs stay visible as the user scrolls long
             sub-pages (Skills section can have many entries). The
             sticky offset is `top-0` because Settings has no app-level
-            header within this scroll container. */}
-        <div className="sticky top-0 z-10 -mx-6 px-6 pb-3 bg-white dark:bg-night-bg border-b border-claude-border dark:border-night-border">
+            header within this scroll container.
+            We deliberately do NOT extend the sticky bg past the
+            `max-w-3xl` content rail with `-mx-` negative margins — that
+            stretches the bg under the page's right-side scrollbar
+            gutter, which makes the gutter visually overlap the tabs
+            during scroll (showed up as a strange "track" artifact in
+            v0.1.41). Keeping the bg inside the content rail puts the
+            scrollbar back where it belongs (outside the rail). */}
+        <div className="sticky top-0 z-10 pb-3 bg-white dark:bg-night-bg border-b border-claude-border dark:border-night-border">
           <nav className="flex gap-1 -mb-px overflow-x-auto" aria-label="设置分类">
             {TAB_DEFINITIONS.map((tab) => (
               <button
@@ -3151,13 +3158,28 @@ function McpSearchRow({
   })();
 
   const needsAck = result.trustTier === 'unaudited';
-  const installEnabled = canInstall && !installed && !installing && (!needsAck || acked);
 
   const envKeyForInput = result.stdioCommand?.envKeys?.[0];
   const needsTokenInput =
     canInstall &&
     result.endpointType === 'stdio-tauri' &&
     Boolean(envKeyForInput);
+  // If the entry declares an env var (e.g. GITHUB_PERSONAL_ACCESS_TOKEN),
+  // gate install on the user actually filling it in. Installing without
+  // the env var produces a child process that crashes immediately on
+  // startup, leaving the user with a vague "error" badge in the MCP
+  // servers list. Far better to refuse install up-front and tell them
+  // what to do — see also the inline help text in the details panel.
+  // v0.1.43 fix.
+  const tokenMissing = needsTokenInput && tokenValue.trim().length === 0;
+
+  // We only `disabled` the button when there's literally nothing the
+  // user can do (already installed, already installing, or transport
+  // not supported). For "missing token" / "unacked" cases we keep the
+  // button clickable so the onClick handler can auto-expand the
+  // details panel and tell the user what's blocking — a visually-grayed
+  // button + tooltip alone leaves people clicking and getting nothing.
+  const installEnabled = canInstall && !installed && !installing;
 
   const handleClick = async () => {
     setInstalling(true);
@@ -3270,14 +3292,32 @@ function McpSearchRow({
             <button
               type="button"
               disabled={!installEnabled}
-              onClick={handleClick}
-              className="btn-primary text-xs disabled:opacity-50"
+              onClick={() => {
+                // Block + auto-expand if user hasn't satisfied
+                // pre-conditions. Auto-expanding nudges them to the
+                // input that needs filling without us alerting.
+                if (tokenMissing) {
+                  setExpanded(true);
+                  return;
+                }
+                if (needsAck && !acked) {
+                  setExpanded(true);
+                  return;
+                }
+                void handleClick();
+              }}
+              className={cn(
+                'btn-primary text-xs disabled:opacity-50',
+                (tokenMissing || (needsAck && !acked)) && 'opacity-60',
+              )}
               title={
                 !canInstall
                   ? '不可一键安装'
-                  : needsAck && !acked
-                    ? '请先勾选确认'
-                    : undefined
+                  : tokenMissing
+                    ? `请先展开详情、填好 ${envKeyForInput} 才能安装`
+                    : needsAck && !acked
+                      ? '请先勾选确认'
+                      : undefined
               }
             >
               <Download className="w-3.5 h-3.5" />
@@ -3338,17 +3378,28 @@ function McpSearchRow({
           {needsTokenInput && envKeyForInput && (
             <div className="space-y-1">
               <div className="text-claude-muted dark:text-night-muted">
-                环境变量{' '}
+                <span className="text-red-500">*</span> 环境变量{' '}
                 <code className="font-mono">{envKeyForInput}</code>
-                （安装时注入到子进程）
+                （必填——空着安装会让子进程立刻崩溃返回 error 状态）
               </div>
               <input
                 type="password"
                 value={tokenValue}
                 onChange={(e) => setTokenValue(e.target.value)}
                 placeholder={`粘贴 ${envKeyForInput}…`}
-                className="w-full px-2 py-1 text-xs rounded border border-claude-border dark:border-night-border bg-white dark:bg-night-bg font-mono"
+                className={cn(
+                  'w-full px-2 py-1 text-xs rounded border bg-white dark:bg-night-bg font-mono',
+                  tokenMissing
+                    ? 'border-red-500/60'
+                    : 'border-claude-border dark:border-night-border',
+                )}
               />
+              {tokenMissing && (
+                <div className="text-red-500 text-[11px]">
+                  必须填这个环境变量才能安装。{envKeyForInput.startsWith('GITHUB') && '在 https://github.com/settings/tokens 生成。'}
+                  {envKeyForInput.startsWith('SLACK') && '在 https://api.slack.com/apps 生成 bot token。'}
+                </div>
+              )}
             </div>
           )}
 
@@ -3418,11 +3469,18 @@ function McpMarketRow({
     entry.endpointType === 'http'
       ? entry.endpointUrl !== undefined
       : Boolean(entry.stdioCommand) && isTauri();
+  // For stdio entries that need an env var (e.g. GITHUB_PERSONAL_ACCESS_TOKEN),
+  // the env is REQUIRED — installing without it crashes the child
+  // process immediately. For HTTP bearer-auth, the token is OPTIONAL
+  // (anonymous fallback is fine for many endpoints).
+  const stdioEnvKeyRequired =
+    canOneClick &&
+    isStdio &&
+    (entry.stdioCommand?.envKeys?.length ?? 0) > 0;
   const needsTokenInput =
     (entry.endpointType === 'http' && entry.authType === 'bearer') ||
-    (canOneClick &&
-      isStdio &&
-      (entry.stdioCommand?.envKeys?.length ?? 0) > 0);
+    stdioEnvKeyRequired;
+  const tokenMissing = stdioEnvKeyRequired && token.trim().length === 0;
 
   const copyCommand = async () => {
     if (!entry.installInstructions) return;
@@ -3507,6 +3565,14 @@ function McpMarketRow({
               type="button"
               disabled={installed || installing}
               onClick={async () => {
+                // Same gating as McpSearchRow: if a stdio env var is
+                // required and empty, expand details so the user sees
+                // the input + nudge rather than producing a child that
+                // crashes on startup.
+                if (tokenMissing) {
+                  setExpanded(true);
+                  return;
+                }
                 setInstalling(true);
                 try {
                   await onInstall(token);
@@ -3514,11 +3580,16 @@ function McpMarketRow({
                   setInstalling(false);
                 }
               }}
-              className="btn-primary text-xs disabled:opacity-50"
+              className={cn(
+                'btn-primary text-xs disabled:opacity-50',
+                tokenMissing && 'opacity-60',
+              )}
               title={
-                isStdio
-                  ? '需要系统装了 Node.js（npx 在 PATH 里）'
-                  : undefined
+                tokenMissing
+                  ? `请先展开详情、填好 ${entry.stdioCommand?.envKeys?.[0]} 才能安装`
+                  : isStdio
+                    ? '需要系统装了 Node.js（npx 在 PATH 里）'
+                    : undefined
               }
             >
               <Download className="w-3.5 h-3.5" />
@@ -3569,11 +3640,11 @@ function McpMarketRow({
               <div className="text-xs text-claude-muted dark:text-night-muted">
                 {isStdio && entry.stdioCommand?.envKeys?.[0] ? (
                   <>
-                    环境变量{' '}
+                    <span className="text-red-500">*</span> 环境变量{' '}
                     <code className="font-mono">
                       {entry.stdioCommand.envKeys[0]}
                     </code>
-                    （安装时注入到子进程）
+                    （必填——空着安装会让子进程立刻崩溃返回 error 状态）
                   </>
                 ) : (
                   <>Bearer token（可选填，不填可先尝试匿名）</>
@@ -3601,8 +3672,18 @@ function McpMarketRow({
                     ? '粘贴 token / 密钥'
                     : 'sk-...'
                 }
-                className="w-full px-2 py-1 text-xs font-mono rounded border border-claude-border dark:border-night-border bg-white dark:bg-night-bg focus:outline-none"
+                className={cn(
+                  'w-full px-2 py-1 text-xs font-mono rounded border bg-white dark:bg-night-bg focus:outline-none',
+                  tokenMissing
+                    ? 'border-red-500/60'
+                    : 'border-claude-border dark:border-night-border',
+                )}
               />
+              {tokenMissing && (
+                <div className="text-red-500 text-[11px]">
+                  必须填这个环境变量才能安装。
+                </div>
+              )}
             </div>
           )}
         </div>
