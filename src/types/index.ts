@@ -132,6 +132,12 @@ export type ProviderId =
   | 'minimax'
   | 'baichuan'
   | 'yi'
+  // v0.1.48: PPIO is a model gateway covering Anthropic + image-gen
+  // models (GPT Image 2). Different protocol per family — we route
+  // imageGen-capability models to /tools/image_generate (server-side
+  // proxy with shared key), and Anthropic chat models will get a
+  // separate translation layer in v0.1.49.
+  | 'ppio'
   | 'custom';
 
 export interface ModelDefinition {
@@ -141,10 +147,17 @@ export interface ModelDefinition {
   description?: string;
   contextWindow: number;
   capabilities: {
+    /** Accepts image inputs (multi-modal vision). Used by Design mode
+     *  to route image-attachment turns to a vision-capable model. */
     vision?: boolean;
     tools?: boolean;
     reasoning?: boolean;
     longContext?: boolean;
+    /** This model **generates** images (raster output) rather than
+     *  participating in chat. Filtered into Design mode's
+     *  "image-gen model" picker. NOT a chat model — calls go through
+     *  /tools/image_generate, not /v1/chat/completions. */
+    imageGen?: boolean;
   };
   /** Which modes this model is best suited for. */
   recommendedFor: WorkMode[];

@@ -15,7 +15,12 @@ import type {
   WorkMode,
 } from '@/types';
 import type { Artifact, ArtifactType } from '@/lib/artifacts';
-import { DEFAULT_MODEL_BY_MODE, DEFAULT_PROVIDERS } from '@/config/providers';
+import {
+  DEFAULT_DESIGN_IMAGE_GEN_MODEL,
+  DEFAULT_DESIGN_VISION_MODEL,
+  DEFAULT_MODEL_BY_MODE,
+  DEFAULT_PROVIDERS,
+} from '@/config/providers';
 import { BUILTIN_SLASH_COMMANDS } from '@/lib/slashCommands';
 import { BUILTIN_SKILLS } from '@/lib/builtinSkills';
 import {
@@ -190,6 +195,19 @@ interface AppState {
   activeProjectId: string | null;
   providers: ProviderConfig[];
   modelByMode: Record<WorkMode, string>;
+  /**
+   * Design mode: model used when the active turn has image attachments
+   * and the language model can't see images. v0.1.48 made this
+   * user-configurable (was hardcoded to qwen3-vl-plus). useStreamedChat
+   * auto-routes vision turns through this id.
+   */
+  designVisionModelId: string;
+  /**
+   * Design mode: model used when the agent calls the `image_generate`
+   * builtin tool. Today only `gpt-image-2` (PPIO) ships, but the slot
+   * exists so future image-gen models slot in cleanly.
+   */
+  designImageGenModelId: string;
   /** All artifacts indexed by id. Multiple versions of the same id overwrite. */
   artifacts: Record<string, Artifact>;
   activeArtifactId: string | null;
@@ -406,6 +424,8 @@ interface AppState {
   setApiKey: (providerId: string, apiKey: string) => void;
   setProviderEnabled: (providerId: string, enabled: boolean) => void;
   setModelForMode: (mode: WorkMode, modelId: string) => void;
+  setDesignVisionModelId: (modelId: string) => void;
+  setDesignImageGenModelId: (modelId: string) => void;
 
   // Projects
   createProject: (name: string, description?: string) => string;
@@ -555,6 +575,8 @@ export const useAppStore = create<AppState>()(
       activeProjectId: null,
       providers: DEFAULT_PROVIDERS,
       modelByMode: { ...DEFAULT_MODEL_BY_MODE },
+      designVisionModelId: DEFAULT_DESIGN_VISION_MODEL,
+      designImageGenModelId: DEFAULT_DESIGN_IMAGE_GEN_MODEL,
       artifacts: {},
       activeArtifactId: null,
 
@@ -941,6 +963,9 @@ export const useAppStore = create<AppState>()(
         })),
       setModelForMode: (mode, modelId) =>
         set((s) => ({ modelByMode: { ...s.modelByMode, [mode]: modelId } })),
+      setDesignVisionModelId: (modelId) => set({ designVisionModelId: modelId }),
+      setDesignImageGenModelId: (modelId) =>
+        set({ designImageGenModelId: modelId }),
 
       // Projects
       createProject: (name, description) => {
@@ -1773,7 +1798,7 @@ export const useAppStore = create<AppState>()(
               // Only a handful of known types. Fall back to 'code' for anything
               // unrecognised so the UI renders something rather than blowing up.
               type: (
-                ['html', 'react', 'svg', 'mermaid', 'markdown', 'code'] as const
+                ['html', 'react', 'svg', 'mermaid', 'markdown', 'code', 'image'] as const
               ).includes(p.type as ArtifactType)
                 ? (p.type as ArtifactType)
                 : 'code',
@@ -1889,6 +1914,8 @@ export const useAppStore = create<AppState>()(
         activeProjectId: s.activeProjectId,
         providers: s.providers,
         modelByMode: s.modelByMode,
+        designVisionModelId: s.designVisionModelId,
+        designImageGenModelId: s.designImageGenModelId,
         artifacts: s.artifacts,
         // MCP + slash + tools
         mcpServers: s.mcpServers,
@@ -1961,6 +1988,15 @@ export const useAppStore = create<AppState>()(
           }
         } else {
           state.modelByMode = { ...DEFAULT_MODEL_BY_MODE };
+        }
+        // v0.1.48 backfill — designVisionModelId / designImageGenModelId
+        // weren't persisted before this version. Pre-v0.1.48 users get
+        // the defaults on first rehydrate and can re-pick from Settings.
+        if (!state.designVisionModelId) {
+          state.designVisionModelId = DEFAULT_DESIGN_VISION_MODEL;
+        }
+        if (!state.designImageGenModelId) {
+          state.designImageGenModelId = DEFAULT_DESIGN_IMAGE_GEN_MODEL;
         }
         // Heal any conversation rows whose modelId was lost — typically from
         // the same upgrade path: created on a build that added a new mode

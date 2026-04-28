@@ -35,6 +35,13 @@ export interface Env {
   //   web_search server-wide.
   BOCHA_API_KEY?: string;
 
+  // PPIO_API_KEY — PPIO platform key, used by /tools/image_generate to
+  // call GPT Image 2 (https://api.ppio.com/v3/gpt-image-2-text-to-image).
+  // Same shared-quota model as BOCHA above: one operator-paid key,
+  // billing happens on PPIO's side. Omit to return 503 from
+  // /tools/image_generate (Design mode then falls back to code-only).
+  PPIO_API_KEY?: string;
+
   // GitHub PAT for the Skills marketplace federated-search endpoint
   //   (`/api/skills/search`). Only needs `public_repo` read scope — we just
   //   call /search/code, /repos/.../license, and raw.githubusercontent.com.

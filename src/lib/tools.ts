@@ -17,6 +17,7 @@
 import type { TodoItem, TodoStatus, WorkMode } from '@/types';
 import type { ToolSpec } from '@/services/providerClient';
 import { FlaudeApiError, webSearch } from '@/lib/flaudeApi';
+import { uid } from '@/lib/utils';
 
 export type ToolSource = 'builtin' | 'mcp' | 'skill';
 
@@ -795,6 +796,130 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
       // Prepend a one-line header so the agent knows it's looking at
       // a specific file (helps with multi-asset reasoning).
       return `=== ${cleaned} (${result.size} bytes) ===\n${result.content}`;
+    },
+  },
+
+  // --- image_generate ----------------------------------------------------
+  // Real image generation via PPIO GPT Image 2. Available in Chat +
+  // Design modes; the Design system prompt explicitly mentions when to
+  // prefer this over writing HTML/SVG/Mermaid.
+  //
+  // Wire: client tool calls Worker `/tools/image_generate` (proxy with
+  // shared PPIO key). Worker validates + forwards + returns
+  // `{prompt, urls, model, size, quality, n}`.
+  //
+  // Tool result text: a short summary plus markdown image references.
+  // The handler ALSO upserts each URL as an `image` artifact via
+  // ctx.upsertArtifact, so they show in the artifacts side panel +
+  // become downloadable. Doing both — inline mention + artifact entry —
+  // mirrors how `create_artifact` works for HTML/SVG.
+  {
+    name: 'image_generate',
+    description:
+      '生成真实的 raster 图像（PNG/JPEG，由 GPT Image 2 模型生成）。' +
+      '当用户要求"画一张图""做个 logo""生成插图""设计一张照片"等需要 *像素图像* 而非 *矢量代码* 的请求时调用。' +
+      '当用户要求 UI 原型 / 流程图 / 图标矢量时不要用此工具——写 HTML/SVG/Mermaid 代码更合适。' +
+      '调用后 Flaude 会自动把图片放进右侧 artifacts 面板，用户可以下载或分享。',
+    parameters: {
+      type: 'object',
+      properties: {
+        prompt: {
+          type: 'string',
+          description:
+            '描述要生成的图像。中英文均可。详细的视觉描述（光照、风格、构图）效果更好。最长 32000 字符。',
+        },
+        size: {
+          type: 'string',
+          enum: ['1024x1024', '1024x1536', '1536x1024', 'auto'],
+          description:
+            '图片尺寸：1024x1024 正方形（默认）/ 1024x1536 竖版 / 1536x1024 横版 / auto 由模型决定。',
+        },
+        quality: {
+          type: 'string',
+          enum: ['low', 'medium', 'high'],
+          description:
+            '生成质量。low 最快最便宜（约 $0.011/张），medium 平衡（默认，约 $0.042/张），high 最佳（约 $0.167/张）。',
+        },
+        n: {
+          type: 'number',
+          description: '生成几张（1-4，默认 1）',
+        },
+      },
+      required: ['prompt'],
+    },
+    source: 'builtin',
+    modes: ['chat', 'design'],
+    handler: async ({ prompt, size, quality, n }, { upsertArtifact }) => {
+      if (typeof prompt !== 'string' || !prompt.trim()) {
+        throw new Error('prompt 必须是非空字符串');
+      }
+      // Read the user's chosen image-gen model from the store. v0.1.48
+      // ships only `gpt-image-2` but the Worker accepts the model id
+      // future-compatibly.
+      const { useAppStore } = await import('@/store/useAppStore');
+      const modelId = useAppStore.getState().designImageGenModelId;
+
+      // Lazy-import authFetch — same circular-dep avoidance as the
+      // other tools that hit the Worker (see toolsForMode comments).
+      const { authFetch } = await import('./flaudeApi');
+
+      const reqBody: Record<string, unknown> = { prompt: prompt.trim(), model: modelId };
+      if (typeof size === 'string') reqBody.size = size;
+      if (typeof quality === 'string') reqBody.quality = quality;
+      if (typeof n === 'number' && n > 0) reqBody.n = Math.min(4, Math.floor(n));
+
+      const res = await authFetch('/tools/image_generate', {
+        method: 'POST',
+        body: JSON.stringify(reqBody),
+      });
+      const body = (await res.json().catch(() => null)) as {
+        urls?: string[];
+        prompt?: string;
+        model?: string;
+        size?: string;
+        quality?: string;
+        error?: string;
+        detail?: string;
+      } | null;
+
+      if (!res.ok || !body || body.error) {
+        const detail = body?.detail ? ` (${body.detail.slice(0, 200)})` : '';
+        throw new Error(
+          `image_generate 失败：${body?.error ?? `HTTP ${res.status}`}${detail}`,
+        );
+      }
+      const urls = body.urls ?? [];
+      if (urls.length === 0) {
+        throw new Error('image_generate 没返回任何图片');
+      }
+
+      // Promote each URL to an `image` artifact so the side panel
+      // renders it. Title uses a short slice of the prompt so users
+      // can tell artifacts apart in the picker.
+      const titleBase = prompt.trim().slice(0, 30);
+      if (upsertArtifact) {
+        urls.forEach((url, i) => {
+          const id = uid('img');
+          upsertArtifact({
+            id,
+            type: 'image',
+            title: urls.length > 1 ? `${titleBase}…(${i + 1})` : titleBase,
+            content: url,
+          });
+        });
+      }
+
+      // Tool result text — markdown image syntax so the chat bubble
+      // also renders the image inline (the markdown renderer already
+      // handles `![](url)`).
+      const lines = [
+        `生成了 ${urls.length} 张图片（${body.size ?? 'auto'} · ${body.quality ?? 'medium'} 质量）：`,
+        '',
+        ...urls.map((url, i) => `![${titleBase} ${i + 1}](${url})`),
+        '',
+        '右侧 artifacts 面板可以查看、下载、或继续生成变体。',
+      ];
+      return lines.join('\n');
     },
   },
 ];

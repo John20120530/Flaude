@@ -9,7 +9,13 @@
  *   ...html...
  *   </artifact>
  *
- * Supported types: html, react, svg, mermaid, markdown, code
+ * Supported types: html, react, svg, mermaid, markdown, code, image
+ *
+ * v0.1.48: `image` is for raster images returned by the
+ * `image_generate` tool (PPIO GPT Image 2 etc.). The `content` field
+ * holds the image URL (PPIO returns CDN URLs); the artifact panel
+ * renders it in an `<img>` wrapped in an HTML page so the existing
+ * iframe-srcdoc rendering pipeline still applies.
  */
 
 export type ArtifactType =
@@ -18,12 +24,18 @@ export type ArtifactType =
   | 'svg'
   | 'mermaid'
   | 'markdown'
-  | 'code';
+  | 'code'
+  | 'image';
 
 export interface Artifact {
   id: string;
   messageId?: string;
   type: ArtifactType;
+  /**
+   * For `type='image'`: the image URL (or data:URI). The content field
+   * holds the URL itself rather than HTML so other consumers (download,
+   * sharing) can pull the URL directly without parsing HTML.
+   */
   title: string;
   language?: string;     // For code artifacts
   content: string;
@@ -270,6 +282,23 @@ export function artifactToHtml(artifact: Artifact): string {
       </head><body class="markdown-body" id="o"></body>
       <script>document.getElementById('o').innerHTML = marked.parse(${JSON.stringify(artifact.content)});</script>
       </html>`;
+    case 'image': {
+      // `content` is the image URL (PPIO CDN typically). Render it
+      // centred with object-fit:contain so the whole picture is
+      // visible regardless of the iframe's aspect ratio. Right-click
+      // → save-as works as it would for any <img>. We escape the URL
+      // for HTML attribute safety even though our trusted server-side
+      // generator is the only origin.
+      const url = escapeHtml(artifact.content);
+      const altText = escapeHtml(artifact.title || 'Generated image');
+      return `<!doctype html><html><head><meta charset="utf-8">
+      <style>
+        html,body{margin:0;padding:0;width:100%;height:100%;background:#fafaf7;display:flex;align-items:center;justify-content:center}
+        img{max-width:100%;max-height:100%;object-fit:contain;display:block}
+      </style></head><body>
+      <img src="${url}" alt="${altText}" />
+      </body></html>`;
+    }
     case 'code':
     default:
       return `<!doctype html><html><head><meta charset="utf-8">
