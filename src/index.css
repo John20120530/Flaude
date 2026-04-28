@@ -44,6 +44,19 @@
     background-clip: padding-box;
     border: 2px solid transparent;
   }
+
+  /* Utility: completely hide the scrollbar while keeping scroll
+     functionality. Used on Settings (where the sticky tab bar would
+     otherwise have the page scrollbar gutter visible inside its
+     bg-band) and other places where the visual scrollbar conflicts
+     with sticky / floating UI. Wheel/trackpad scroll still works. */
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
 }
 
 @layer components {

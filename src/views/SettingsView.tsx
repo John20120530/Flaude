@@ -109,7 +109,7 @@ export default function SettingsView() {
   const [activeTab, setActiveTab] = useState<SettingsTab>('general');
 
   return (
-    <div className="flex-1 overflow-y-auto">
+    <div className="flex-1 overflow-y-auto no-scrollbar">
       <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
         <div>
           <h1 className="text-2xl font-semibold">设置</h1>
@@ -123,13 +123,15 @@ export default function SettingsView() {
             sub-pages (Skills section can have many entries). The
             sticky offset is `top-0` because Settings has no app-level
             header within this scroll container.
-            We deliberately do NOT extend the sticky bg past the
-            `max-w-3xl` content rail with `-mx-` negative margins — that
-            stretches the bg under the page's right-side scrollbar
-            gutter, which makes the gutter visually overlap the tabs
-            during scroll (showed up as a strange "track" artifact in
-            v0.1.41). Keeping the bg inside the content rail puts the
-            scrollbar back where it belongs (outside the rail). */}
+            v0.1.45: outer container uses `no-scrollbar` to hide the
+            page scrollbar entirely. The previous fix (drop the sticky
+            div's `-mx-6 px-6`) didn't actually move the scrollbar
+            visually because the outer container's `overflow-y-auto`
+            still reserves a 10px gutter (per index.css scrollbar
+            styling) that visually intrudes into the sticky bar's
+            right edge. Hiding the scrollbar leaves wheel/trackpad
+            scroll fully functional and removes the "track" artifact
+            for good. */}
         <div className="sticky top-0 z-10 pb-3 bg-white dark:bg-night-bg border-b border-claude-border dark:border-night-border">
           <nav className="flex gap-1 -mb-px overflow-x-auto" aria-label="设置分类">
             {TAB_DEFINITIONS.map((tab) => (
@@ -1762,15 +1764,31 @@ function MCPRow({
             断开
           </button>
         ) : (
-          <button
-            onClick={onConnect}
-            disabled={!server.enabled || busy}
-            className="btn-ghost text-xs"
-            title="连接并发现工具"
-          >
-            <LinkIcon className="w-3.5 h-3.5" />
-            连接
-          </button>
+          (() => {
+            // Web (non-Tauri) cannot spawn stdio child processes — the
+            // Tauri sidecar API is the only path. Showing a "连接" button
+            // that's guaranteed to fail with "stdio MCP 仅在桌面版可用"
+            // is worse than disabling it with a clear hint, especially
+            // since users who hit this "error" badge had no way to
+            // recover within the web app. v0.1.45 fix.
+            const isStdioOnWeb =
+              server.transport === 'stdio' && !isTauri();
+            return (
+              <button
+                onClick={onConnect}
+                disabled={!server.enabled || busy || isStdioOnWeb}
+                className="btn-ghost text-xs"
+                title={
+                  isStdioOnWeb
+                    ? 'stdio MCP 仅桌面版支持（浏览器不能 spawn 子进程）。请下载桌面版 Flaude，或本地启动后用 mcp-proxy 包成 HTTP。'
+                    : '连接并发现工具'
+                }
+              >
+                <LinkIcon className="w-3.5 h-3.5" />
+                连接
+              </button>
+            );
+          })()
         )}
         <button
           onClick={onRemove}
@@ -1781,8 +1799,34 @@ function MCPRow({
         </button>
       </div>
       {server.lastError && (
-        <div className="mt-2 text-xs text-red-500 font-mono">
-          错误：{server.lastError}
+        <div className="mt-2 text-xs text-red-500 bg-red-500/5 border border-red-500/20 rounded px-2 py-1.5 break-words">
+          <div className="font-medium">连接失败</div>
+          <div className="font-mono text-[11px] mt-0.5">{server.lastError}</div>
+          {/* Inline hints for the most common stdio failure modes —
+              users see the cryptic underlying error and need a nudge
+              about what to actually do next. */}
+          {server.transport === 'stdio' && !isTauri() && (
+            <div className="mt-1 text-[11px] not-italic">
+              💡 浏览器不能 spawn 本地进程 — stdio MCP 必须用桌面版 Flaude，或本地启动后用 mcp-proxy 包成 HTTP。
+            </div>
+          )}
+          {server.transport === 'stdio' &&
+            isTauri() &&
+            /npx|ENOENT|spawn|not found/i.test(server.lastError) && (
+              <div className="mt-1 text-[11px] not-italic">
+                💡 看起来像 npx / Node.js 不在 PATH。装 Node.js LTS 后重启 Flaude（PATH 是启动时读的）。
+              </div>
+            )}
+          {server.transport === 'stdio' &&
+            (server.stdioConfig?.env === undefined ||
+              Object.keys(server.stdioConfig?.env ?? {}).length === 0) &&
+            (server.name.toLowerCase().includes('github') ||
+              server.name.toLowerCase().includes('slack') ||
+              server.name.toLowerCase().includes('postgres')) && (
+              <div className="mt-1 text-[11px] not-italic">
+                💡 这类 MCP 通常需要 token / 凭据环境变量。删掉这条，回 MCP 市场重新「展开详情」填好 token 再装。
+              </div>
+            )}
         </div>
       )}
       {server.toolNames && server.toolNames.length > 0 && (
@@ -3161,17 +3205,14 @@ function McpMarketSection() {
             />
           );
         })}
-        {showingSearch &&
-          searchResults &&
-          searchResults.map((r) => (
-            <McpSearchRow
-              key={r.id}
-              result={r}
-              installed={isSearchResultInstalled(r)}
-              isOnTauri={isOnTauri}
-              onInstall={handleInstall}
-            />
-          ))}
+        {showingSearch && searchResults && (
+          <McpSearchResultsByEndpoint
+            results={searchResults}
+            isOnTauri={isOnTauri}
+            isInstalled={isSearchResultInstalled}
+            onInstall={handleInstall}
+          />
+        )}
         {showingSearch &&
           !searchLoading &&
           !searchError &&
@@ -3183,6 +3224,128 @@ function McpMarketSection() {
           )}
       </div>
     </section>
+  );
+}
+
+/**
+ * Render search results grouped by endpoint type: HTTP first
+ * (works on web + desktop, no Node.js, no env-var fiddling), then
+ * stdio-tauri (one-click on desktop), then stdio-instructions
+ * (manual setup). v0.1.45 — without this grouping, an unaudited
+ * HTTP entry was being out-ranked by popular stdio entries due to
+ * the absolute trust-tier weight. Users searching for "memory"
+ * complained that HTTP entries appeared invisible.
+ *
+ * Within each group, the server-side rank order is preserved
+ * (trust tier + signals + cross-source presence + endpoint bonus).
+ */
+function McpSearchResultsByEndpoint({
+  results,
+  isOnTauri,
+  isInstalled,
+  onInstall,
+}: {
+  results: McpSearchResult[];
+  isOnTauri: boolean;
+  isInstalled: (r: McpSearchResult) => boolean;
+  onInstall: (
+    spec:
+      | { kind: 'http'; title: string; url: string; token?: string }
+      | {
+          kind: 'stdio-tauri';
+          title: string;
+          command: string;
+          args: string[];
+          envKey?: string;
+          envValue?: string;
+        }
+      | { kind: 'unsupported'; reason: string },
+  ) => Promise<void> | void;
+}) {
+  const http = results.filter((r) => r.endpointType === 'http');
+  const stdioTauri = results.filter((r) => r.endpointType === 'stdio-tauri');
+  const stdioManual = results.filter(
+    (r) => r.endpointType === 'stdio-instructions',
+  );
+
+  return (
+    <>
+      {http.length > 0 && (
+        <McpSearchGroup
+          label={`HTTP（一键装，网页/桌面都能用）· ${http.length}`}
+          accentClass="bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+          results={http}
+          isOnTauri={isOnTauri}
+          isInstalled={isInstalled}
+          onInstall={onInstall}
+        />
+      )}
+      {stdioTauri.length > 0 && (
+        <McpSearchGroup
+          label={`stdio${isOnTauri ? '（桌面一键装）' : '（仅桌面）'} · ${stdioTauri.length}`}
+          accentClass="bg-blue-500/10 text-blue-700 dark:text-blue-400"
+          results={stdioTauri}
+          isOnTauri={isOnTauri}
+          isInstalled={isInstalled}
+          onInstall={onInstall}
+        />
+      )}
+      {stdioManual.length > 0 && (
+        <McpSearchGroup
+          label={`需手动安装 · ${stdioManual.length}`}
+          accentClass="bg-zinc-500/10 text-zinc-700 dark:text-zinc-400"
+          results={stdioManual}
+          isOnTauri={isOnTauri}
+          isInstalled={isInstalled}
+          onInstall={onInstall}
+        />
+      )}
+    </>
+  );
+}
+
+function McpSearchGroup({
+  label,
+  accentClass,
+  results,
+  isOnTauri,
+  isInstalled,
+  onInstall,
+}: {
+  label: string;
+  accentClass: string;
+  results: McpSearchResult[];
+  isOnTauri: boolean;
+  isInstalled: (r: McpSearchResult) => boolean;
+  onInstall: (
+    spec:
+      | { kind: 'http'; title: string; url: string; token?: string }
+      | {
+          kind: 'stdio-tauri';
+          title: string;
+          command: string;
+          args: string[];
+          envKey?: string;
+          envValue?: string;
+        }
+      | { kind: 'unsupported'; reason: string },
+  ) => Promise<void> | void;
+}) {
+  return (
+    <div className="space-y-2 mt-3">
+      <div className="text-xs font-medium flex items-center gap-2">
+        <span className={cn('px-2 py-0.5 rounded', accentClass)}>{label}</span>
+      </div>
+      {results.map((r) => (
+        <McpSearchRow
+          key={r.id}
+          result={r}
+          installed={isInstalled(r)}
+          isOnTauri={isOnTauri}
+          onInstall={onInstall}
+        />
+      ))}
+    </div>
   );
 }
 

@@ -867,20 +867,37 @@ export const useAppStore = create<AppState>()(
         })),
       appendMessage: (conversationId, message) =>
         set((s) => ({
-          conversations: s.conversations.map((c) =>
-            c.id === conversationId
-              ? {
-                  ...c,
-                  messages: [...c.messages, message],
-                  updatedAt: Date.now(),
-                  // Auto-title from first user message
-                  title:
-                    c.messages.length === 0 && message.role === 'user'
-                      ? message.content.slice(0, 40).trim() || c.title
-                      : c.title,
-                }
-              : c
-          ),
+          conversations: s.conversations.map((c) => {
+            if (c.id !== conversationId) return c;
+            // v0.1.45 backfill: legacy code conversations created before
+            // v0.1.43 don't have `workspacePath` stamped, so the
+            // "restore workspace on switch" feature has no data to
+            // restore. We bind the binding the first time the user
+            // actually sends a message in the conversation — that's the
+            // moment they're committing to "this conversation in this
+            // workspace", and we know the user-visible workspace at this
+            // exact moment is the one they want associated. Idempotent:
+            // a conversation that already has workspacePath is left
+            // alone (so we never overwrite an explicit binding).
+            const shouldBackfillWorkspace =
+              c.mode === 'code' &&
+              !c.workspacePath &&
+              !!s.workspacePath &&
+              message.role === 'user';
+            return {
+              ...c,
+              messages: [...c.messages, message],
+              updatedAt: Date.now(),
+              // Auto-title from first user message
+              title:
+                c.messages.length === 0 && message.role === 'user'
+                  ? message.content.slice(0, 40).trim() || c.title
+                  : c.title,
+              workspacePath: shouldBackfillWorkspace
+                ? s.workspacePath ?? undefined
+                : c.workspacePath,
+            };
+          }),
           dirtyConversationIds: includeDirty(s.dirtyConversationIds, conversationId),
         })),
       // patchLastMessage fires many times per second during streaming. We
