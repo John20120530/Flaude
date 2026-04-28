@@ -9,7 +9,6 @@ import {
   estimateTokens,
 } from '@/lib/tokenEstimate';
 import { summarizeConversation } from '@/lib/conversationSummary';
-import { DESIGN_VISION_FALLBACK_MODEL } from '@/config/providers';
 import {
   PLAN_MODE_PROMPT,
   isDestructiveToolName,
@@ -44,7 +43,8 @@ import type { ArtifactType } from '@/lib/artifacts';
 function pickModelOverride(
   mode: Conversation['mode'],
   currentModelId: string,
-  attachments: Attachment[]
+  attachments: Attachment[],
+  visionModelId: string,
 ): string | undefined {
   if (mode !== 'design') return undefined;
   const hasImage = attachments.some((a) =>
@@ -52,12 +52,22 @@ function pickModelOverride(
   );
   if (!hasImage) return undefined;
   // Already on a vision-capable model? Don't bounce to a different one — if
-  // the user manually picked Qwen / GLM-4 they presumably wanted it.
-  if (currentModelId === DESIGN_VISION_FALLBACK_MODEL) return undefined;
-  if (currentModelId.startsWith('qwen-') || currentModelId.startsWith('glm-')) {
+  // the user manually picked Qwen / GLM-4 / Claude they presumably wanted it.
+  // The "vision-capable" heuristic is loose on purpose (prefix match) so we
+  // don't have to reach back into the providers catalog from here; cleaner
+  // when there's a real per-model `capabilities.vision` field but moving to
+  // it requires threading providers through every caller. For now: name
+  // prefixes cover all currently-shipping vision models.
+  if (currentModelId === visionModelId) return undefined;
+  if (
+    currentModelId.startsWith('qwen-') ||
+    currentModelId.startsWith('qwen3-vl-') ||
+    currentModelId.startsWith('glm-') ||
+    currentModelId.startsWith('pa/claude-') // v0.1.49 Claude provider prefix
+  ) {
     return undefined;
   }
-  return DESIGN_VISION_FALLBACK_MODEL;
+  return visionModelId;
 }
 
 interface Options {
@@ -776,10 +786,14 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
       // vision-capable model when there's an image attached. The conversation's
       // stored modelId stays untouched, so the next text-only turn returns to
       // V4 Pro automatically. See pickModelOverride() for the policy.
+      // v0.1.48: vision model id is user-configurable in Settings →
+      // 默认模型 → design · 视觉; we read the live store value here so
+      // changes take effect for the very next message without reload.
       const modelOverride = pickModelOverride(
         conversation.mode,
         conversation.modelId,
-        attachments
+        attachments,
+        useAppStore.getState().designVisionModelId,
       );
 
       const userMsg: Message = {
@@ -875,7 +889,8 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
     const modelOverride = pickModelOverride(
       conversation.mode,
       conversation.modelId,
-      lastUserAttachments
+      lastUserAttachments,
+      useAppStore.getState().designVisionModelId,
     );
 
     await runTurn(history, target.id, fullSystem, modelOverride);

@@ -194,9 +194,48 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = [
       },
     ],
   },
+  {
+    // PPIO is a model gateway exposing multiple model families behind
+    // ONE host but DIFFERENT endpoint paths. The `baseUrl` field on
+    // ProviderConfig is OpenAI-compat-shaped — it doesn't fit cleanly
+    // here, since neither of PPIO's path families is OpenAI-compatible
+    // for Claude or for image gen. We keep `baseUrl` set to the host
+    // root for clarity and document the actual paths in each model's
+    // comment.
+    //
+    // Path family 1 — image gen: POST https://api.ppio.com/v3/gpt-image-2-text-to-image
+    //   Invoked via Worker `/tools/image_generate` (server-side proxy
+    //   with shared key). Does NOT use ProviderConfig.baseUrl at all
+    //   — the Worker hardcodes the full URL.
+    //
+    // Path family 2 — Anthropic chat (v0.1.49): POST https://api.ppio.com/anthropic/v1/messages
+    //   Will be wired by a Worker-side OpenAI ↔ Anthropic translator
+    //   that detects pa/claude-* model ids and switches base path.
+    //   Currently no chat models register under ppio so this path is
+    //   inactive in v0.1.48.
+    id: 'ppio',
+    displayName: 'PPIO 派欧',
+    baseUrl: 'https://api.ppio.com',
+    enabled: true,
+    models: [
+      {
+        id: 'gpt-image-2',
+        providerId: 'ppio',
+        displayName: 'GPT Image 2 · 文生图',
+        description:
+          '高质量 AI 图像生成。Design 模式 image_generate 工具调用此模型。低/中/高三档质量。' +
+          '实际请求走 Worker 代理 → POST api.ppio.com/v3/gpt-image-2-text-to-image。',
+        contextWindow: 0, // image gen — not a chat model
+        capabilities: { imageGen: true },
+        recommendedFor: ['design'],
+      },
+    ],
+  },
 ];
 
-/** Default model picks per mode — used when user has not overridden. */
+/** Default *language* model picks per mode — used when user has not overridden.
+ *  Design has additional defaults (vision + image-gen) below; this one is
+ *  for the text/code generation slot only. */
 export const DEFAULT_MODEL_BY_MODE: Record<'chat' | 'code' | 'design', string> = {
   chat: 'deepseek-chat',
   code: 'deepseek-chat',
@@ -207,6 +246,18 @@ export const DEFAULT_MODEL_BY_MODE: Record<'chat' | 'code' | 'design', string> =
   // we surface that hint via UI in DesignView.
   design: 'deepseek-v4-pro',
 };
+
+/** Default vision model for Design mode. Used when an image is attached and
+ *  the active language model can't see images — useStreamedChat auto-routes
+ *  that single turn through this model. v0.1.48 made this user-configurable
+ *  via Settings → 默认模型 → Design → 视觉模型. */
+export const DEFAULT_DESIGN_VISION_MODEL = 'qwen3-vl-plus';
+
+/** Default image-generation model for Design mode. The `image_generate`
+ *  tool calls /tools/image_generate with this model id; v1 only supports
+ *  gpt-image-2 but the server-side endpoint accepts a `model` field for
+ *  future expansion. */
+export const DEFAULT_DESIGN_IMAGE_GEN_MODEL = 'gpt-image-2';
 
 /**
  * Vision-capable model used as a fallback when a Design-mode message has

@@ -98,9 +98,9 @@ const TAB_DEFINITIONS: Array<{
 ];
 
 export default function SettingsView() {
-  const providers = useAppStore((s) => s.providers);
-  const modelByMode = useAppStore((s) => s.modelByMode);
-  const setModelForMode = useAppStore((s) => s.setModelForMode);
+  // Default-models picker has been hoisted into <DefaultModelsSection>
+  // (right below the General tab body). Top-level component now just
+  // owns the tab state + chrome.
 
   // Tab state. Lifted-but-not-persisted: re-mounting Settings (e.g. by
   // route navigation) resets to General. That's a reasonable default —
@@ -166,39 +166,7 @@ export default function SettingsView() {
               <AccountSection />
 
               {/* Mode defaults */}
-              <section>
-                <h2 className="text-lg font-semibold mb-3">默认模型</h2>
-                <p className="text-xs text-claude-muted dark:text-night-muted mb-3">
-                  不同模式的默认模型。模型列表由服务端提供——本机选不到的型号说明服务端没开。
-                </p>
-                <div className="space-y-2">
-                  {(['chat', 'code', 'design'] as const).map((mode) => (
-                    <div
-                      key={mode}
-                      className="flex items-center gap-3 p-3 rounded-lg border border-claude-border dark:border-night-border"
-                    >
-                      <div className="w-20 text-sm capitalize">{mode}</div>
-                      <select
-                        value={modelByMode[mode]}
-                        onChange={(e) => setModelForMode(mode, e.target.value)}
-                        className="flex-1 bg-transparent border border-claude-border dark:border-night-border rounded-md px-2 py-1.5 text-sm"
-                      >
-                        {providers
-                          .filter((p) => p.enabled)
-                          .map((p) => (
-                            <optgroup key={p.id} label={p.displayName}>
-                              {p.models.map((m) => (
-                                <option key={m.id} value={m.id}>
-                                  {m.displayName}
-                                </option>
-                              ))}
-                            </optgroup>
-                          ))}
-                      </select>
-                    </div>
-                  ))}
-                </div>
-              </section>
+              <DefaultModelsSection />
 
               <DesktopSection />
 
@@ -245,6 +213,141 @@ export default function SettingsView() {
         </div>
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Default models per mode — Chat / Code each have one language slot,
+// Design has three (language / vision / image-gen). v0.1.48 split this
+// out from the inline render in `<SettingsView>` so the dropdown
+// filtering by capability lives in one place.
+// ---------------------------------------------------------------------------
+
+function DefaultModelsSection() {
+  const providers = useAppStore((s) => s.providers);
+  const modelByMode = useAppStore((s) => s.modelByMode);
+  const setModelForMode = useAppStore((s) => s.setModelForMode);
+  const designVisionModelId = useAppStore((s) => s.designVisionModelId);
+  const setDesignVisionModelId = useAppStore((s) => s.setDesignVisionModelId);
+  const designImageGenModelId = useAppStore((s) => s.designImageGenModelId);
+  const setDesignImageGenModelId = useAppStore(
+    (s) => s.setDesignImageGenModelId,
+  );
+
+  // Build flat candidate lists once. We could memoize harder, but at
+  // 5-15 models in the default catalog the filtering is sub-millisecond.
+  const enabledProviders = providers.filter((p) => p.enabled);
+
+  // "Language" candidates = anything that isn't an image-gen-only model.
+  // (Vision-capable language models still show here; vision is additive.)
+  const languageProviders = enabledProviders
+    .map((p) => ({
+      ...p,
+      models: p.models.filter((m) => !m.capabilities.imageGen),
+    }))
+    .filter((p) => p.models.length > 0);
+
+  // Vision-capable language models. Filtering by `capabilities.vision`
+  // surfaces Qwen3-VL-* + GLM-4-Plus today, and Claude family in v0.1.49
+  // once the provider lands.
+  const visionProviders = enabledProviders
+    .map((p) => ({
+      ...p,
+      models: p.models.filter((m) => m.capabilities.vision),
+    }))
+    .filter((p) => p.models.length > 0);
+
+  // Image-generation models — separate axis from chat. Today only
+  // gpt-image-2 (PPIO).
+  const imageGenProviders = enabledProviders
+    .map((p) => ({
+      ...p,
+      models: p.models.filter((m) => m.capabilities.imageGen),
+    }))
+    .filter((p) => p.models.length > 0);
+
+  const renderSelect = (
+    value: string,
+    onChange: (v: string) => void,
+    grouped: typeof enabledProviders,
+    emptyHint: string,
+  ) => (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="flex-1 bg-transparent border border-claude-border dark:border-night-border rounded-md px-2 py-1.5 text-sm disabled:opacity-50"
+      disabled={grouped.length === 0}
+    >
+      {grouped.length === 0 && <option value="">{emptyHint}</option>}
+      {grouped.map((p) => (
+        <optgroup key={p.id} label={p.displayName}>
+          {p.models.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.displayName}
+            </option>
+          ))}
+        </optgroup>
+      ))}
+    </select>
+  );
+
+  return (
+    <section>
+      <h2 className="text-lg font-semibold mb-3">默认模型</h2>
+      <p className="text-xs text-claude-muted dark:text-night-muted mb-3">
+        不同模式的默认模型。Design 模式有三个槽位：
+        <strong>语言模型</strong>（生成 HTML/SVG/解释）、
+        <strong>视觉模型</strong>（理解上传的图片，自动接管含图请求的那一轮）、
+        <strong>生图模型</strong>（agent 调用 image_generate 工具时用）。
+      </p>
+      <div className="space-y-2">
+        {(['chat', 'code'] as const).map((mode) => (
+          <div
+            key={mode}
+            className="flex items-center gap-3 p-3 rounded-lg border border-claude-border dark:border-night-border"
+          >
+            <div className="w-24 text-sm capitalize">{mode}</div>
+            {renderSelect(
+              modelByMode[mode],
+              (v) => setModelForMode(mode, v),
+              languageProviders,
+              '无可用模型',
+            )}
+          </div>
+        ))}
+        {/* Design — three rows under one umbrella label so users see at a
+            glance these belong together. */}
+        <div className="rounded-lg border border-claude-border dark:border-night-border divide-y divide-claude-border/50 dark:divide-night-border/50">
+          <div className="flex items-center gap-3 p-3">
+            <div className="w-24 text-sm">design · 语言</div>
+            {renderSelect(
+              modelByMode.design,
+              (v) => setModelForMode('design', v),
+              languageProviders,
+              '无可用模型',
+            )}
+          </div>
+          <div className="flex items-center gap-3 p-3">
+            <div className="w-24 text-sm">design · 视觉</div>
+            {renderSelect(
+              designVisionModelId,
+              setDesignVisionModelId,
+              visionProviders,
+              '无视觉模型（请启用 Qwen 等）',
+            )}
+          </div>
+          <div className="flex items-center gap-3 p-3">
+            <div className="w-24 text-sm">design · 生图</div>
+            {renderSelect(
+              designImageGenModelId,
+              setDesignImageGenModelId,
+              imageGenProviders,
+              '无生图模型（请启用 PPIO）',
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 

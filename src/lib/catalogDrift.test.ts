@@ -35,15 +35,20 @@ import { DEFAULT_PROVIDERS, DEFAULT_MODEL_BY_MODE } from '@/config/providers';
 import { listSupportedModels } from '../../server/src/providers';
 
 describe('client/server catalog drift', () => {
-  it('every default-enabled client model id is registered on the server', () => {
-    const clientIds = DEFAULT_PROVIDERS.filter((p) => p.enabled).flatMap((p) =>
-      p.models.map((m) => m.id),
-    );
+  it('every default-enabled CHAT client model id is registered on the server', () => {
+    // Skip image-gen-only models: those don't go through /v1/chat/completions
+    // (so server resolveModel() doesn't need to know them — they hit
+    // /tools/image_generate instead). v0.1.48 added gpt-image-2 which
+    // would otherwise trip this check.
+    const clientIds = DEFAULT_PROVIDERS.filter((p) => p.enabled)
+      .flatMap((p) => p.models)
+      .filter((m) => !m.capabilities.imageGen)
+      .map((m) => m.id);
     const serverIds = new Set(listSupportedModels());
     const missing = clientIds.filter((id) => !serverIds.has(id));
     expect(
       missing,
-      `client catalog exposes model ids that server resolveModel() does not ` +
+      `client catalog exposes chat model ids that server resolveModel() does not ` +
         `recognise: [${missing.join(', ')}]. Add them to server/src/providers.ts ` +
         `MODEL_INDEX so /v1/chat/completions stops returning "unsupported model".`,
     ).toEqual([]);
