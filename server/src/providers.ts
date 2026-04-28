@@ -15,7 +15,7 @@
  */
 import type { Env } from './env';
 
-export type ProviderId = 'deepseek' | 'qwen' | 'zhipu' | 'moonshot';
+export type ProviderId = 'deepseek' | 'qwen' | 'zhipu' | 'moonshot' | 'ppio';
 
 export interface ModelPricing {
   /** Input tokens: cost in micro-USD per 1_000 tokens. */
@@ -172,7 +172,42 @@ const MOONSHOT: ProviderConfig = {
   },
 };
 
-const PROVIDERS: ProviderConfig[] = [DEEPSEEK, QWEN, ZHIPU, MOONSHOT];
+// PPIO Claude — v0.1.49. Uses Anthropic native protocol, NOT
+// OpenAI-compat. The `baseUrl` here is the *root* of the Anthropic
+// path family (`/anthropic`); chat.ts appends `/v1/messages` and
+// switches to `x-api-key` + `anthropic-version` headers when it sees
+// a request resolved to this provider. The translateRequest /
+// translateStream functions in anthropicAdapter.ts handle the wire-
+// format conversion in both directions.
+//
+// PPIO Claude pricing as of 2026-04-28 (PPIO 文档/计费页面 — re-verify
+// before deploys; pricing has fluctuated 10-15% on Anthropic upstream
+// over the year). PPIO matches Anthropic list prices in CNY which we
+// approximate as USD here at the platform's published rate. If actual
+// billing diverges we adjust the constants — they only affect
+// usage_log records, not user-visible behavior.
+//
+//   sonnet-4-6  : input  $3.00 / 1M  → 3000 micros/1k
+//                 output $15.00 / 1M → 15000
+//   haiku-4-5   : input  $1.00 / 1M  → 1000 micros/1k
+//                 output $5.00 / 1M  → 5000
+//   opus-4-6    : input  $15.00 / 1M → 15000 micros/1k
+//                 output $75.00 / 1M → 75000
+const PPIO: ProviderConfig = {
+  id: 'ppio',
+  // Root of the Anthropic-family endpoint. chat.ts appends /v1/messages.
+  // (The image-gen endpoint /v3/gpt-image-2-text-to-image is hardcoded
+  // in tools.ts — it doesn't go through this provider config.)
+  baseUrl: 'https://api.ppio.com/anthropic',
+  keyEnvName: 'PPIO_API_KEY',
+  models: {
+    'pa/claude-sonnet-4-6':         { inputMicroUsdPer1k:  3000, outputMicroUsdPer1k: 15000 },
+    'pa/claude-haiku-4-5-20251001': { inputMicroUsdPer1k:  1000, outputMicroUsdPer1k:  5000 },
+    'pa/claude-opus-4-6':           { inputMicroUsdPer1k: 15000, outputMicroUsdPer1k: 75000 },
+  },
+};
+
+const PROVIDERS: ProviderConfig[] = [DEEPSEEK, QWEN, ZHIPU, MOONSHOT, PPIO];
 
 // Flat lookup: model string → (provider, pricing). Built once at module load.
 const MODEL_INDEX: Record<string, { provider: ProviderConfig; pricing: ModelPricing }> = {};

@@ -209,10 +209,13 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = [
     //   — the Worker hardcodes the full URL.
     //
     // Path family 2 — Anthropic chat (v0.1.49): POST https://api.ppio.com/anthropic/v1/messages
-    //   Will be wired by a Worker-side OpenAI ↔ Anthropic translator
-    //   that detects pa/claude-* model ids and switches base path.
-    //   Currently no chat models register under ppio so this path is
-    //   inactive in v0.1.48.
+    //   Wired by a Worker-side OpenAI ↔ Anthropic translator
+    //   (server/src/anthropicAdapter.ts) that detects `pa/claude-*` model
+    //   ids and switches request base path + auth header (Bearer →
+    //   x-api-key + anthropic-version) + body shape (OpenAI messages →
+    //   Anthropic system/messages/content blocks). Streaming is
+    //   transformed event-by-event so the client still consumes
+    //   OpenAI-shaped SSE.
     id: 'ppio',
     displayName: 'PPIO 派欧',
     baseUrl: 'https://api.ppio.com',
@@ -228,6 +231,47 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = [
         contextWindow: 0, // image gen — not a chat model
         capabilities: { imageGen: true },
         recommendedFor: ['design'],
+      },
+      {
+        // Claude Sonnet 4.6 — daily-driver Claude tier. Best balance of
+        // intelligence + speed + cost in the 4.x lineage. Tools + vision +
+        // reasoning all on. Recommended for everyday Code + Design work
+        // where DeepSeek V4 Pro feels slightly off.
+        id: 'pa/claude-sonnet-4-6',
+        providerId: 'ppio',
+        displayName: 'Claude Sonnet 4.6',
+        description:
+          '日常旗舰 Claude（4.x 线）。代码 / 推理 / 视觉 / 工具调用全开。$3 / $15 per M tokens。',
+        contextWindow: 200_000,
+        capabilities: { tools: true, vision: true, reasoning: true, longContext: true },
+        recommendedFor: ['chat', 'code', 'design'],
+      },
+      {
+        // Claude Haiku 4.5 — fastest / cheapest of the 4.x line. Vision
+        // + tools still supported but with weaker reasoning. Good for
+        // chat / classification / quick lookups where Sonnet is overkill.
+        id: 'pa/claude-haiku-4-5-20251001',
+        providerId: 'ppio',
+        displayName: 'Claude Haiku 4.5',
+        description:
+          '小尺寸 Claude，快 + 便宜。视觉 + 工具仍开。适合快速对话 / 分类。$1 / $5 per M tokens。',
+        contextWindow: 200_000,
+        capabilities: { tools: true, vision: true },
+        recommendedFor: ['chat'],
+      },
+      {
+        // Claude Opus 4.6 — top-tier reasoning. 5x cost of Sonnet,
+        // typically reserved for tasks Sonnet visibly fails at (long-form
+        // synthesis, hard math, multi-step planning). Don't make it the
+        // default — too easy to burn budget unintentionally.
+        id: 'pa/claude-opus-4-6',
+        providerId: 'ppio',
+        displayName: 'Claude Opus 4.6',
+        description:
+          '顶配 Claude，深度推理 / 长文综合 / 难任务。$15 / $75 per M tokens——重任务再开。',
+        contextWindow: 200_000,
+        capabilities: { tools: true, vision: true, reasoning: true, longContext: true },
+        recommendedFor: ['code'],
       },
     ],
   },

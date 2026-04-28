@@ -24,6 +24,13 @@
  */
 import { Hono } from 'hono';
 
+import {
+  type AnthropicResponse,
+  type OpenAIRequest,
+  translateRequest,
+  translateResponse,
+  translateStream,
+} from './anthropicAdapter';
 import type { AppContext } from './env';
 import { requireAuth } from './middleware';
 import {
@@ -139,13 +146,44 @@ chat.post('/v1/chat/completions', async (c) => {
   const forwardBody: Record<string, unknown> = { ...body };
   delete forwardBody.conversation_id;
 
-  // For streaming, force the upstream to emit a final usage chunk so we
-  // can log tokens. include_usage is the OpenAI stream_options flag and
-  // DeepSeek honours it. If the client set its own stream_options we merge,
-  // so we don't clobber any forward-compat fields.
-  if (wantsStream) {
-    const existing = (forwardBody.stream_options ?? {}) as Record<string, unknown>;
-    forwardBody.stream_options = { ...existing, include_usage: true };
+  // v0.1.49: PPIO Claude models speak Anthropic native protocol on
+  // /anthropic/v1/messages. We translate the OpenAI-shape request the
+  // client just sent into an Anthropic-shape request, send it with the
+  // x-api-key + anthropic-version headers PPIO expects, then translate
+  // the response (or SSE stream) back to OpenAI shape so the client
+  // doesn't see the difference.
+  const useAnthropicProtocol = resolved.provider.id === 'ppio';
+
+  let upstreamUrl: string;
+  let upstreamHeaders: Record<string, string>;
+  let upstreamBody: string;
+
+  if (useAnthropicProtocol) {
+    upstreamUrl = `${resolved.provider.baseUrl}/v1/messages`;
+    upstreamHeaders = {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    };
+    upstreamBody = JSON.stringify(
+      translateRequest(forwardBody as OpenAIRequest),
+    );
+  } else {
+    upstreamUrl = resolved.provider.baseUrl;
+    upstreamHeaders = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    };
+    // For streaming OpenAI-compat, force the upstream to emit a final
+    // usage chunk so we can log tokens. include_usage is the OpenAI
+    // stream_options flag DeepSeek/Qwen/GLM honour. If the client set
+    // its own stream_options we merge so forward-compat fields survive.
+    // (Anthropic always emits usage in message_delta — no flag needed.)
+    if (wantsStream) {
+      const existing = (forwardBody.stream_options ?? {}) as Record<string, unknown>;
+      forwardBody.stream_options = { ...existing, include_usage: true };
+    }
+    upstreamBody = JSON.stringify(forwardBody);
   }
 
   // ---- call upstream --------------------------------------------------
@@ -161,13 +199,10 @@ chat.post('/v1/chat/completions', async (c) => {
 
   let upstream: Response;
   try {
-    upstream = await fetch(resolved.provider.baseUrl, {
+    upstream = await fetch(upstreamUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(forwardBody),
+      headers: upstreamHeaders,
+      body: upstreamBody,
       signal: ctrl.signal,
     });
   } catch (err) {
@@ -200,9 +235,18 @@ chat.post('/v1/chat/completions', async (c) => {
       return c.json({ error: 'upstream returned empty stream' }, 502);
     }
 
+    // For PPIO/Anthropic, transform the upstream SSE through our
+    // adapter first so what flows downstream is OpenAI-shaped (which
+    // is what both the client AND `accumulateStreamUsage` expect).
+    // For OpenAI-compat providers (DeepSeek/Qwen/etc.) the body is
+    // already in the right shape — pipe straight through.
+    const sseStream: ReadableStream<Uint8Array> = useAnthropicProtocol
+      ? upstream.body.pipeThrough(translateStream(model))
+      : upstream.body;
+
     // Split the SSE stream in two: one copy goes straight to the client as
     // bytes pass through, the other is read in-memory by the accumulator.
-    const [toClient, toAccumulator] = upstream.body.tee();
+    const [toClient, toAccumulator] = sseStream.tee();
 
     // Fire-and-forget with waitUntil. This keeps the isolate alive until the
     // usage row is persisted, even if the client closes the connection early.
@@ -242,7 +286,16 @@ chat.post('/v1/chat/completions', async (c) => {
   }
 
   // ---- non-streaming path ---------------------------------------------
-  const json = (await upstream.json()) as { usage?: OpenAIUsage };
+  let json: { usage?: OpenAIUsage };
+  if (useAnthropicProtocol) {
+    // Anthropic returns its own shape; translate to OpenAI before doing
+    // anything else so usage extraction + the client-facing response
+    // both follow the same code path.
+    const raw = (await upstream.json()) as AnthropicResponse;
+    json = translateResponse(raw);
+  } else {
+    json = (await upstream.json()) as { usage?: OpenAIUsage };
+  }
 
   if (json.usage) {
     const cost = computeCostMicroUsd(
