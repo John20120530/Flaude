@@ -903,6 +903,17 @@ export const useAppStore = create<AppState>()(
       // patchLastMessage fires many times per second during streaming. We
       // mark dirty here too, but the actual push is debounced in sync.ts so
       // we don't DDoS our own server with every token.
+      //
+      // v0.1.46: do NOT bump `updatedAt` per-token. The sidebar sorts
+      // conversations by `updatedAt DESC`, so when two conversations
+      // stream at once, every patched token rotates them to the top in
+      // turn — the sidebar list flickers / their positions swap dozens
+      // of times per second. Stamping `updatedAt` once at stream start
+      // (via the matching `appendMessage` for the assistant placeholder)
+      // is enough for "newest in flight floats up"; we don't need the
+      // extra resolution. The sidebar timestamp ("21:10") therefore
+      // doesn't tick live during streaming — fine, it's the conversation
+      // list, not a stream progress bar.
       patchLastMessage: (conversationId, patch) =>
         set((s) => ({
           conversations: s.conversations.map((c) => {
@@ -910,7 +921,7 @@ export const useAppStore = create<AppState>()(
             const msgs = [...c.messages];
             const last = msgs[msgs.length - 1];
             msgs[msgs.length - 1] = { ...last, ...patch };
-            return { ...c, messages: msgs, updatedAt: Date.now() };
+            return { ...c, messages: msgs };
           }),
           dirtyConversationIds: includeDirty(s.dirtyConversationIds, conversationId),
         })),
