@@ -886,36 +886,62 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
         error?: string;
         detail?: string;
       };
-      const callOnce = async (): Promise<{ res: Response; body: ImageGenBody | null }> => {
-        const r = await authFetch('/tools/image_generate', {
-          method: 'POST',
-          body: JSON.stringify(reqBody),
-        });
-        const b = (await r.json().catch(() => null)) as ImageGenBody | null;
-        return { res: r, body: b };
+      type CallResult =
+        | { kind: 'response'; res: Response; body: ImageGenBody | null }
+        | { kind: 'fetch_error'; error: string };
+      const callOnce = async (): Promise<CallResult> => {
+        try {
+          const r = await authFetch('/tools/image_generate', {
+            method: 'POST',
+            body: JSON.stringify(reqBody),
+          });
+          const b = (await r.json().catch(() => null)) as ImageGenBody | null;
+          return { kind: 'response', res: r, body: b };
+        } catch (err) {
+          // v0.1.60: Tauri WebView2 / browser fetch can throw `TypeError:
+          // Failed to fetch` for a grab-bag of transport-layer reasons —
+          // connection reset, TLS handshake aborted, WebView2's internal
+          // connection pool getting confused after several long-lived
+          // requests, etc. Pre-v0.1.60 this propagated up as the raw error
+          // (user saw "工具错误: Failed to fetch") with no retry, even
+          // though it's almost always a one-off the next call recovers
+          // from. Treat it like a transient timeout: classify, retry once.
+          return { kind: 'fetch_error', error: (err as Error).message ?? 'fetch failed' };
+        }
       };
 
-      let { res, body } = await callOnce();
-      // Detect "transient timeout" — Worker maps PPIO timeout AbortError to
-      // 502 + error: 'image_generate timed out'. Anything else (4xx, quota,
-      // PPIO content moderation, etc.) is permanent and shouldn't be retried.
-      const isTimeout =
-        res.status === 502 &&
-        typeof body?.error === 'string' &&
-        body.error.includes('timed out');
-      if (isTimeout) {
-        // Single retry, no backoff — PPIO usually responds instantly on the
-        // second try if its first attempt died on a slow path. Adding sleep
-        // would just make the user wait another 60-90s on top of the
-        // already-burned 100s.
-        const retried = await callOnce();
-        res = retried.res;
-        body = retried.body;
+      const isTransient = (r: CallResult): boolean => {
+        if (r.kind === 'fetch_error') return true;
+        // Worker maps PPIO timeout AbortError to 502 + 'timed out'.
+        return (
+          r.res.status === 502 &&
+          typeof r.body?.error === 'string' &&
+          r.body.error.includes('timed out')
+        );
+      };
+
+      let result = await callOnce();
+      const firstWasTransient = isTransient(result);
+      if (firstWasTransient) {
+        // Single retry, no backoff. Permanent errors (4xx auth, quota,
+        // content moderation, etc.) skip retry to avoid double-billing.
+        result = await callOnce();
       }
 
+      // If the second attempt also threw at the fetch layer, surface a
+      // descriptive message so the model can do a smart fallback (placeholder
+      // image, alternate phrasing, etc.) instead of the bare 'Failed to fetch'.
+      if (result.kind === 'fetch_error') {
+        const hint = firstWasTransient
+          ? '（已自动重试 1 次仍 fetch 失败；可能是网络瞬断或 WebView 连接池抽风，建议告诉用户暂时改用占位图，下一轮再试）'
+          : '（建议用占位图先把版面排出来，等用户重发再试图片）';
+        throw new Error(`image_generate 失败：${result.error}${hint}`);
+      }
+
+      const { res, body } = result;
       if (!res.ok || !body || body.error) {
         const detail = body?.detail ? ` (${body.detail.slice(0, 200)})` : '';
-        const retryHint = isTimeout
+        const retryHint = firstWasTransient
           ? '（已自动重试 1 次仍失败；建议换 1024x1024 + low quality 再试，或继续用占位图先把版面排出来）'
           : '';
         throw new Error(
