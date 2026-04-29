@@ -184,6 +184,13 @@ interface AppState {
   artifactsOpen: boolean;
   /** Width (px) of the right-side artifacts panel. Drag-resizable, persisted. */
   artifactsPanelWidth: number;
+  /**
+   * Width (px) of the left chat column in Design mode. Drag-resizable
+   * via the gutter between chat column and canvas. v0.1.57 made it
+   * dynamic — was hard-coded 440px before. Default 440 keeps existing
+   * users' layout identical until they drag.
+   */
+  designChatColumnWidth: number;
   /** Height (px) of the Code-mode bottom panel (Tools/Terminal/Git/后台任务).
    *  Drag-resizable via the divider above the tabs. */
   codeBottomPanelHeight: number;
@@ -375,6 +382,7 @@ interface AppState {
   toggleSidebar: () => void;
   toggleArtifacts: () => void;
   setArtifactsPanelWidth: (px: number) => void;
+  setDesignChatColumnWidth: (px: number) => void;
   setCodeBottomPanelHeight: (px: number) => void;
   setActiveMode: (m: WorkMode) => void;
 
@@ -574,6 +582,7 @@ export const useAppStore = create<AppState>()(
       sidebarOpen: true,
       artifactsOpen: false,
       artifactsPanelWidth: 480,
+      designChatColumnWidth: 440,
       codeBottomPanelHeight: 180,
       activeMode: 'chat',
 
@@ -625,6 +634,11 @@ export const useAppStore = create<AppState>()(
       // the panel at 10px or 5000px and make the layout look broken.
       setArtifactsPanelWidth: (px) =>
         set({ artifactsPanelWidth: Math.min(1200, Math.max(320, Math.round(px))) }),
+      // Clamp [320, 900]: 320 keeps the Composer + at least one MessageList
+      // line readable; 900 leaves the canvas at least ~380px on a 1280-wide
+      // window which is the smallest mobile-portrait breakpoint we render.
+      setDesignChatColumnWidth: (px) =>
+        set({ designChatColumnWidth: Math.min(900, Math.max(320, Math.round(px))) }),
       setCodeBottomPanelHeight: (px) =>
         set({ codeBottomPanelHeight: Math.min(800, Math.max(80, Math.round(px))) }),
       setActiveMode: (mode) => set({ activeMode: mode }),
@@ -1923,6 +1937,7 @@ export const useAppStore = create<AppState>()(
         theme: s.theme,
         sidebarOpen: s.sidebarOpen,
         artifactsPanelWidth: s.artifactsPanelWidth,
+        designChatColumnWidth: s.designChatColumnWidth,
         codeBottomPanelHeight: s.codeBottomPanelHeight,
         activeMode: s.activeMode,
         // Strip the base64 `data` off attachments before writing to localStorage —
@@ -2068,6 +2083,12 @@ export const useAppStore = create<AppState>()(
         // Defensive: pre-v0.1.30 persisted state has no codeBottomPanelHeight.
         if (typeof state.codeBottomPanelHeight !== 'number') {
           state.codeBottomPanelHeight = 180;
+        }
+        // Pre-v0.1.57 persisted state has no designChatColumnWidth — the
+        // Design chat column was hard-coded to 440px before. Match the
+        // old default so existing users see no layout shift on upgrade.
+        if (typeof state.designChatColumnWidth !== 'number') {
+          state.designChatColumnWidth = 440;
         }
         // Stdio MCP statuses don't survive a process restart: the child
         // got reaped when the app exited, the in-memory `stdioSessions`

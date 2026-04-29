@@ -257,11 +257,16 @@ tools.post('/tools/image_generate', async (c) => {
   const rawN = Number(body.n);
   const n = Number.isFinite(rawN) ? Math.max(1, Math.min(4, Math.floor(rawN))) : 1;
 
-  // Cap at 60s — high-quality generations can take 30s+. Beyond 60s
-  // the user has almost certainly given up and a hung Worker isolate
-  // is wasted money.
+  // Cap at 120s. v0.1.57: live measurement on prod showed simple
+  // prompts ("a red apple on a white table") landing at exactly 60s
+  // and complex Chinese prompts (~450 chars: Confucius + Socrates +
+  // detailed scene) consistently exceeding 60s — ours was the bottleneck,
+  // not PPIO. 120s comfortably covers the 99th percentile of detailed
+  // medium-quality generations while still bailing on a wedged isolate
+  // before Cloudflare's ~100s subrequest cap kicks in (effective ceiling
+  // is min of these two; 120s just means we never tighten it ourselves).
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 60_000);
+  const timer = setTimeout(() => ctrl.abort(), 120_000);
 
   let upstream: Response;
   try {
