@@ -819,7 +819,12 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
       '生成真实的 raster 图像（PNG/JPEG，由 GPT Image 2 模型生成）。' +
       '当用户要求"画一张图""做个 logo""生成插图""设计一张照片"等需要 *像素图像* 而非 *矢量代码* 的请求时调用。' +
       '当用户要求 UI 原型 / 流程图 / 图标矢量时不要用此工具——写 HTML/SVG/Mermaid 代码更合适。' +
-      '调用后 Flaude 会自动把图片放进右侧 artifacts 面板，用户可以下载或分享。',
+      '调用后 Flaude 会自动把图片放进右侧 artifacts 面板，用户可以下载或分享。' +
+      // v0.1.59: 加超时 + 尺寸引导。Cloudflare Workers subrequest cap ~100s 是硬上限，' +
+      // 1536x1024 / 1024x1536 高分辨率经常超过这个，导致 image_generate timed out。' +
+      // 1024x1024 + medium quality 是最稳的组合。
+      '【重要】1024x1024 是最稳定的尺寸，几乎都能在 ~60s 内完成；1536x1024 / 1024x1536 在复杂中文 prompt 上经常超过 100s 触发 timed out——除非用户明确要竖版/横版，否则就用默认 1024x1024。' +
+      '【超时兜底】如果上一次调用 image_generate timed out，**不要重试同样的参数**（再次超时概率高）；要么换更小的 size + low quality，要么直接告诉用户图片服务暂时不稳定并继续后续工作（写占位图、HTML 排版等）。',
     parameters: {
       type: 'object',
       properties: {
@@ -832,13 +837,13 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
           type: 'string',
           enum: ['1024x1024', '1024x1536', '1536x1024', 'auto'],
           description:
-            '图片尺寸：1024x1024 正方形（默认）/ 1024x1536 竖版 / 1536x1024 横版 / auto 由模型决定。',
+            '图片尺寸：**默认且推荐 1024x1024**（最稳，几乎不超时）/ 1024x1536 竖版（偶尔超时）/ 1536x1024 横版（偶尔超时）/ auto 由模型决定。除非用户明确要某个特定方向，否则用 1024x1024。',
         },
         quality: {
           type: 'string',
           enum: ['low', 'medium', 'high'],
           description:
-            '生成质量。low 最快最便宜（约 $0.011/张），medium 平衡（默认，约 $0.042/张），high 最佳（约 $0.167/张）。',
+            '生成质量。low 最快最便宜（约 $0.011/张），medium 平衡（默认，约 $0.042/张），high 最佳但慢一倍多容易超时（约 $0.167/张）。',
         },
         n: {
           type: 'number',
@@ -868,11 +873,11 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
       if (typeof quality === 'string') reqBody.quality = quality;
       if (typeof n === 'number' && n > 0) reqBody.n = Math.min(4, Math.floor(n));
 
-      const res = await authFetch('/tools/image_generate', {
-        method: 'POST',
-        body: JSON.stringify(reqBody),
-      });
-      const body = (await res.json().catch(() => null)) as {
+      // v0.1.59: PPIO GPT Image 2 偶发卡到 100s+ 触发 Cloudflare subrequest cap →
+      // Worker 502 + "image_generate timed out"。同 prompt 第二次往往就过（PPIO
+      // 内部排队 / cold start 抖动）。所以做一次 transparent retry，timed-out 只
+      // 退一次，其它错误（quota / 认证 / 内容审核）直接抛不重试以避免双倍计费。
+      type ImageGenBody = {
         urls?: string[];
         prompt?: string;
         model?: string;
@@ -880,12 +885,41 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
         quality?: string;
         error?: string;
         detail?: string;
-      } | null;
+      };
+      const callOnce = async (): Promise<{ res: Response; body: ImageGenBody | null }> => {
+        const r = await authFetch('/tools/image_generate', {
+          method: 'POST',
+          body: JSON.stringify(reqBody),
+        });
+        const b = (await r.json().catch(() => null)) as ImageGenBody | null;
+        return { res: r, body: b };
+      };
+
+      let { res, body } = await callOnce();
+      // Detect "transient timeout" — Worker maps PPIO timeout AbortError to
+      // 502 + error: 'image_generate timed out'. Anything else (4xx, quota,
+      // PPIO content moderation, etc.) is permanent and shouldn't be retried.
+      const isTimeout =
+        res.status === 502 &&
+        typeof body?.error === 'string' &&
+        body.error.includes('timed out');
+      if (isTimeout) {
+        // Single retry, no backoff — PPIO usually responds instantly on the
+        // second try if its first attempt died on a slow path. Adding sleep
+        // would just make the user wait another 60-90s on top of the
+        // already-burned 100s.
+        const retried = await callOnce();
+        res = retried.res;
+        body = retried.body;
+      }
 
       if (!res.ok || !body || body.error) {
         const detail = body?.detail ? ` (${body.detail.slice(0, 200)})` : '';
+        const retryHint = isTimeout
+          ? '（已自动重试 1 次仍失败；建议换 1024x1024 + low quality 再试，或继续用占位图先把版面排出来）'
+          : '';
         throw new Error(
-          `image_generate 失败：${body?.error ?? `HTTP ${res.status}`}${detail}`,
+          `image_generate 失败：${body?.error ?? `HTTP ${res.status}`}${detail}${retryHint}`,
         );
       }
       const urls = body.urls ?? [];
