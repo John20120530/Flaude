@@ -372,3 +372,28 @@ export const REASONER_PAIRS: Record<string, string> = {
   'pa/claude-opus-4-6': 'pa/claude-opus-4-6-thinking',
   'pa/claude-opus-4-6-thinking': 'pa/claude-opus-4-6',
 };
+
+/**
+ * Is this model id the "thinking ON" side of a reasoner pair?
+ *
+ * Composer's 「思考」 toggle uses this to decide whether the button is
+ * highlighted (purple "on" pill) vs neutral. **It's deliberately separate
+ * from `capabilities.reasoning`**: that capability flag advertises a
+ * model's general reasoning strength to the user (e.g. Claude Opus 4.6 is
+ * a strong reasoner regardless of whether extended-thinking is enabled —
+ * we want the 推理 badge in the model dropdown). Conflating the two —
+ * which v0.1.50 / v0.1.51 did — meant Opus 4.6 (capabilities.reasoning
+ * = true) showed the toggle as already-ON and clicking it just bounced
+ * to the `-thinking` variant (still ON) → user could never turn it off.
+ *
+ * Rule of truth: thinking is ON iff the current model id matches a
+ * statically-known thinking variant — Anthropic's `-thinking` suffix or
+ * DeepSeek's `deepseek-reasoner` alias. Any future provider that adds
+ * a clean toggle should be appended here, NOT inferred from capabilities.
+ */
+export function isThinkingVariant(modelId: string): boolean {
+  if (!modelId) return false;
+  if (modelId.endsWith('-thinking')) return true;
+  if (modelId === 'deepseek-reasoner') return true;
+  return false;
+}

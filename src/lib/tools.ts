@@ -896,11 +896,21 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
       // Promote each URL to an `image` artifact so the side panel
       // renders it. Title uses a short slice of the prompt so users
       // can tell artifacts apart in the picker.
+      //
+      // v0.1.53: skip the promotion in Design mode. The DesignCanvas
+      // already shows the rendered HTML (which embeds the image inline),
+      // and the artifacts panel is hidden in Design mode anyway —
+      // duplicating the image as a standalone artifact just clutters
+      // the conversation's artifact list with thumbnails the user
+      // doesn't see and can't click. Chat / Code modes still get the
+      // promotion since their right pane IS the artifacts panel.
       const titleBase = prompt.trim().slice(0, 30);
-      if (upsertArtifact) {
+      const activeMode = useAppStore.getState().activeMode;
+      const promoteToArtifacts = upsertArtifact && activeMode !== 'design';
+      if (promoteToArtifacts) {
         urls.forEach((url, i) => {
           const id = uid('img');
-          upsertArtifact({
+          upsertArtifact!({
             id,
             type: 'image',
             title: urls.length > 1 ? `${titleBase}…(${i + 1})` : titleBase,
@@ -911,13 +921,18 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
 
       // Tool result text — markdown image syntax so the chat bubble
       // also renders the image inline (the markdown renderer already
-      // handles `![](url)`).
+      // handles `![](url)`). The trailing hint changes per mode: in
+      // Chat/Code we point at the artifacts panel; in Design we point
+      // at the canvas (which is where the embedded image will render
+      // once the next assistant turn writes the HTML).
       const lines = [
         `生成了 ${urls.length} 张图片（${body.size ?? 'auto'} · ${body.quality ?? 'medium'} 质量）：`,
         '',
         ...urls.map((url, i) => `![${titleBase} ${i + 1}](${url})`),
         '',
-        '右侧 artifacts 面板可以查看、下载、或继续生成变体。',
+        promoteToArtifacts
+          ? '右侧 artifacts 面板可以查看、下载、或继续生成变体。'
+          : '可以把这些 URL 嵌入到 HTML 设计稿里（`<img src="..." />`），右侧画布会渲染。',
       ];
       return lines.join('\n');
     },

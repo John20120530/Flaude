@@ -26,7 +26,7 @@ import { cn } from '@/lib/utils';
 import type { Attachment, SlashCommand } from '@/types';
 import { uid } from '@/lib/utils';
 import { useAppStore } from '@/store/useAppStore';
-import { REASONER_PAIRS } from '@/config/providers';
+import { REASONER_PAIRS, isThinkingVariant } from '@/config/providers';
 import {
   expandTemplate,
   parseSlashInput,
@@ -118,12 +118,18 @@ export default function Composer({
     return undefined;
   }, [providers, activeConv]);
   // Only show the toggle when the current model has a reasoning sibling.
-  // `thinkingOn` is driven by the *model's* capability flag so we don't
-  // have to hard-code "which id is the reasoner side" per family.
+  // v0.1.53: `thinkingOn` is driven by `isThinkingVariant(modelId)` — a
+  // hard-coded list of "this id is the thinking side" — NOT by
+  // `capabilities.reasoning`. The capability flag is for marketing the
+  // model's general strength (e.g. Opus 4.6 is a strong reasoner whether
+  // or not extended-thinking is enabled), and conflating the two meant
+  // the toggle stuck on for Opus/Sonnet 4.6: Opus had reasoning=true,
+  // toggle showed ON, clicking flipped to `-thinking` variant which ALSO
+  // had reasoning=true → indistinguishable → "关不掉了".
   const pairedModelId = activeConv
     ? REASONER_PAIRS[activeConv.modelId]
     : undefined;
-  const thinkingOn = activeModel?.capabilities?.reasoning === true;
+  const thinkingOn = isThinkingVariant(activeConv?.modelId ?? '');
   const hasPair = pairedModelId !== undefined;
 
   const toggleThinking = () => {

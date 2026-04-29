@@ -236,14 +236,19 @@ export default function TopBar() {
           )}
         </button>
 
-        <button
-          onClick={toggleArtifacts}
-          className={cn('btn-ghost', artifactsOpen && 'bg-black/5 dark:bg-white/5')}
-          aria-label="工件面板"
-          title={artifactsOpen ? '关闭工件面板' : '打开工件面板（查看代码 / 网页 / 图表等生成物）'}
-        >
-          <PanelRight className="w-4 h-4" />
-        </button>
+        {/* The artifacts panel is suppressed in Design mode (the canvas IS
+            the primary artifact view there), so don't render the toggle
+            either — clicking it would do nothing visible. */}
+        {!isDesign && (
+          <button
+            onClick={toggleArtifacts}
+            className={cn('btn-ghost', artifactsOpen && 'bg-black/5 dark:bg-white/5')}
+            aria-label="工件面板"
+            title={artifactsOpen ? '关闭工件面板' : '打开工件面板（查看代码 / 网页 / 图表等生成物）'}
+          >
+            <PanelRight className="w-4 h-4" />
+          </button>
+        )}
       </div>
     </header>
   );
