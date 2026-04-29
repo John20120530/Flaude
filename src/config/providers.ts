@@ -305,6 +305,55 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = [
       },
     ],
   },
+  // v0.1.62 — PPIO Google Gemini via OpenAI-compatible host.
+  //
+  // Why a separate provider entry from `ppio`: PPIO splits Anthropic and
+  // OpenAI-compatible families across different hosts (api.ppio.com/anthropic
+  // for Claude, api.ppinfra.com/openai for everything else). The Worker
+  // routes by ProviderId — `ppio` triggers the Anthropic translation layer,
+  // `ppio-openai` rides the standard OpenAI-compat path used by DeepSeek/
+  // Qwen/Moonshot. Both share PPIO_API_KEY.
+  //
+  // Why only 2 Gemini entries when PDF lists 7: catalog hygiene. Adding
+  // every minor variant (2.0-flash-lite, 2.5-flash-lite, etc.) makes the
+  // dropdown unwieldy without adding meaningfully different options. The
+  // two we expose:
+  //   - Gemini 2.5 Pro   — flagship, deep reasoning + multimodal + 1M ctx
+  //   - Gemini 2.5 Flash — fast/cheap default, still multimodal
+  //
+  // Why NOT Gemini 3: PPIO had `pa/gemini-3-pro-preview` listed in their
+  // docs as of v0.1.62 release time, but live availability check returned
+  // 500 MODEL_NOT_AVAILABLE — only `pa/gemini-3-flash-preview` was actually
+  // routable. We stick with the 2.5 generation which is fully GA on PPIO.
+  // When 3 lands properly we'll bump these IDs in a later release.
+  {
+    id: 'ppio-openai',
+    displayName: 'Google Gemini (PPIO)',
+    baseUrl: 'https://api.ppinfra.com/openai/v1/chat/completions',
+    enabled: true,
+    models: [
+      {
+        id: 'pa/gmn-2.5-pr',
+        providerId: 'ppio-openai',
+        displayName: 'Gemini 2.5 Pro',
+        description:
+          'Google 旗舰多模态模型。文本 / 视觉 / 视频 / 音频全收，深度推理 + Google Search grounding，1M 上下文。$1.25 / $10 per M tokens。',
+        contextWindow: 1_000_000,
+        capabilities: { tools: true, vision: true, reasoning: true, longContext: true },
+        recommendedFor: ['chat', 'code', 'design'],
+      },
+      {
+        id: 'pa/gmn-2.5-fls',
+        providerId: 'ppio-openai',
+        displayName: 'Gemini 2.5 Flash',
+        description:
+          'Google 速度/成本平衡档。多模态输入（图/视频/音频），thinking 可选关闭。$0.30 / $2.50 per M tokens——比 Pro 便宜约 4 倍。',
+        contextWindow: 1_000_000,
+        capabilities: { tools: true, vision: true },
+        recommendedFor: ['chat', 'code', 'design'],
+      },
+    ],
+  },
 ];
 
 /** Default *language* model picks per mode — used when user has not overridden.

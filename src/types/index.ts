@@ -149,6 +149,11 @@ export type ProviderId =
   // proxy with shared key), and Anthropic chat models will get a
   // separate translation layer in v0.1.49.
   | 'ppio'
+  // v0.1.62: PPIO also exposes Google Gemini through their *separate*
+  // OpenAI-compatible host (api.ppinfra.com). Different protocol surface
+  // from `ppio` (which is reserved for the Anthropic native path used
+  // by Claude). Same PPIO_API_KEY works for both.
+  | 'ppio-openai'
   | 'custom';
 
 export interface ModelDefinition {

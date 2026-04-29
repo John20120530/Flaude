@@ -152,6 +152,12 @@ chat.post('/v1/chat/completions', async (c) => {
   // x-api-key + anthropic-version headers PPIO expects, then translate
   // the response (or SSE stream) back to OpenAI shape so the client
   // doesn't see the difference.
+  //
+  // v0.1.62: PPIO also exposes Google Gemini via a *separate* OpenAI-
+  // compatible host (api.ppinfra.com), registered as `ppio-openai`. That
+  // path uses the standard OpenAI body/stream shape — no translation
+  // needed — so the Anthropic gate must match `'ppio'` exclusively, not
+  // `provider.id.startsWith('ppio')`.
   const useAnthropicProtocol = resolved.provider.id === 'ppio';
 
   let upstreamUrl: string;
@@ -206,6 +212,11 @@ chat.post('/v1/chat/completions', async (c) => {
   //     limits the absolute worst case below this number, so 180s is
   //     "as much slack as the runtime will give us"; effective ceiling
   //     is whichever is smaller.
+  // v0.1.62: PPIO Gemini OpenAI-compat path (`ppio-openai`) gets the
+  // standard 60s — Gemini ttfb is 1-3s for non-thinking, 3-15s for
+  // thinking. Only the Anthropic Claude path (`ppio`) needs 180s
+  // because Anthropic buffers the entire thinking block before flushing
+  // the first SSE event.
   const ABORT_MS = resolved.provider.id === 'ppio' ? 180_000 : 60_000;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ABORT_MS);

@@ -15,7 +15,7 @@
  */
 import type { Env } from './env';
 
-export type ProviderId = 'deepseek' | 'qwen' | 'moonshot' | 'ppio';
+export type ProviderId = 'deepseek' | 'qwen' | 'moonshot' | 'ppio' | 'ppio-openai';
 
 export interface ModelPricing {
   /** Input tokens: cost in micro-USD per 1_000 tokens. */
@@ -200,7 +200,50 @@ const PPIO: ProviderConfig = {
   },
 };
 
-const PROVIDERS: ProviderConfig[] = [DEEPSEEK, QWEN, MOONSHOT, PPIO];
+// PPIO Gemini — v0.1.62. PPIO exposes Google Gemini through their *OpenAI-
+// compatible* endpoint (api.ppinfra.com/openai/v1/chat/completions), which
+// is a different host AND a different protocol from the Anthropic-native one
+// the Claude family uses (api.ppio.com/anthropic/v1/messages). Same
+// PPIO_API_KEY is accepted by both surfaces.
+//
+// Two providers under one key was the cleanest split: chat.ts already
+// branches on `provider.id === 'ppio'` for Anthropic translation, and we
+// want Gemini to skip that branch and ride the existing OpenAI-compat
+// path used by DeepSeek/Qwen/Moonshot. Adding 'ppio-openai' as a peer
+// keeps that branching logic tight ("provider.id === 'ppio'" stays
+// Anthropic-exclusive) and avoids a per-model protocol field.
+//
+// Pricing as of 2026-04 (PPIO public docs; cross-check at deploy time):
+//   gemini-3-pro-preview  : input  $1.25 / 1M → 1250 micros/1k
+//                           output $10.00 / 1M → 10000
+//   gemini-3-flash-preview: input  $0.30 / 1M → 300
+//                           output $2.50 / 1M → 2500
+//   gmn-2.5-pr            : input  $1.25 / 1M → 1250
+//                           output $10.00 / 1M → 10000
+//   gmn-2.5-fls           : input  $0.30 / 1M → 300
+//                           output $2.50 / 1M → 2500
+//   gmn-2.5-fls-lt        : input  $0.10 / 1M → 100
+//                           output $0.40 / 1M → 400
+//   gmn-2.0-fls-20250609  : input  $0.10 / 1M → 100
+//                           output $0.40 / 1M → 400
+//   gmn-2.0-fls-lt        : input  $0.075 / 1M → 75
+//                           output $0.30 / 1M → 300
+const PPIO_OPENAI: ProviderConfig = {
+  id: 'ppio-openai',
+  baseUrl: 'https://api.ppinfra.com/openai/v1/chat/completions',
+  keyEnvName: 'PPIO_API_KEY',
+  models: {
+    'pa/gemini-3-pro-preview':    { inputMicroUsdPer1k: 1250, outputMicroUsdPer1k: 10000 },
+    'pa/gemini-3-flash-preview':  { inputMicroUsdPer1k:  300, outputMicroUsdPer1k:  2500 },
+    'pa/gmn-2.5-pr':              { inputMicroUsdPer1k: 1250, outputMicroUsdPer1k: 10000 },
+    'pa/gmn-2.5-fls':             { inputMicroUsdPer1k:  300, outputMicroUsdPer1k:  2500 },
+    'pa/gmn-2.5-fls-lt':          { inputMicroUsdPer1k:  100, outputMicroUsdPer1k:   400 },
+    'pa/gmn-2.0-fls-20250609':    { inputMicroUsdPer1k:  100, outputMicroUsdPer1k:   400 },
+    'pa/gmn-2.0-fls-lt':          { inputMicroUsdPer1k:   75, outputMicroUsdPer1k:   300 },
+  },
+};
+
+const PROVIDERS: ProviderConfig[] = [DEEPSEEK, QWEN, MOONSHOT, PPIO, PPIO_OPENAI];
 
 // Flat lookup: model string → (provider, pricing). Built once at module load.
 const MODEL_INDEX: Record<string, { provider: ProviderConfig; pricing: ModelPricing }> = {};
