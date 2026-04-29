@@ -46,6 +46,42 @@ export default function DesignView() {
   const newConversation = useAppStore((s) => s.newConversation);
   const setActiveConversation = useAppStore((s) => s.setActiveConversation);
   const setConversationSummary = useAppStore((s) => s.setConversationSummary);
+  const designChatColumnWidth = useAppStore((s) => s.designChatColumnWidth);
+  const setDesignChatColumnWidth = useAppStore(
+    (s) => s.setDesignChatColumnWidth,
+  );
+
+  // Drag handler for the gutter between chat column and canvas. Mirrors
+  // the AppShell artifacts-panel resize: we capture the starting width +
+  // mouseX, listen for movement on document so dragging off the gutter
+  // doesn't lose tracking, and re-apply during the drag with cursor +
+  // user-select bookkeeping. Store action clamps so we don't need a
+  // guard here. Inlined into the closure (rather than refs) so React
+  // Compiler's "access before declare" check stays happy and unmount
+  // cleanup falls out for free — listeners are always paired with the
+  // mouseup that attached them.
+  const onDividerDragStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = designChatColumnWidth;
+    const onMove = (ev: MouseEvent) => {
+      // Gutter is on the RIGHT of the chat column → moving mouse right
+      // grows the chat column, left shrinks it. Opposite sign convention
+      // from the artifacts panel (which is on the right edge of the
+      // screen, so its drag math inverts).
+      setDesignChatColumnWidth(startWidth + (ev.clientX - startX));
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
 
   const conversation = useMemo(
     () => conversations.find((c) => c.id === conversationId && c.mode === 'design'),
@@ -117,8 +153,14 @@ export default function DesignView() {
 
   return (
     <div className="flex-1 flex min-h-0">
-      {/* Left: chat column */}
-      <div className="w-[440px] shrink-0 flex flex-col min-h-0 border-r border-claude-border dark:border-night-border bg-claude-surface dark:bg-night-surface">
+      {/* Left: chat column. Width is drag-resizable via the gutter to its
+          right; persisted across launches in store.designChatColumnWidth.
+          We omit the right border because the gutter itself is the visible
+          divider (1.5px hairline + accent on hover). */}
+      <div
+        className="shrink-0 flex flex-col min-h-0 bg-claude-surface dark:bg-night-surface"
+        style={{ width: `${designChatColumnWidth}px` }}
+      >
         <MessageList
           messages={conversation.messages}
           conversationId={conversation.id}
@@ -146,9 +188,20 @@ export default function DesignView() {
         />
       </div>
 
+      {/* Drag-handle gutter between chat column and canvas. Mirrors the
+          ArtifactsPanel gutter — wider hit area (`w-1.5`) than the visible
+          hairline so a small mouse can grab it without precision. */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整对话栏宽度"
+        onMouseDown={onDividerDragStart}
+        className="w-1.5 shrink-0 cursor-col-resize bg-claude-border dark:bg-night-border hover:bg-claude-accent/60 transition-colors"
+      />
+
       {/* Right: canvas. `relative` lets the streaming overlay inside the
           canvas position absolutely against this column. */}
-      <div className="flex-1 flex min-h-0 relative">
+      <div className="flex-1 flex min-h-0 relative min-w-0">
         <DesignCanvas blocks={designBlocks} streaming={chat.streaming} />
       </div>
     </div>
