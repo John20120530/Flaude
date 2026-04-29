@@ -15,7 +15,7 @@
  * and return a normalized result shape so the client doesn't have to know
  * anything about 博查.
  */
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 
 import type { AppContext } from './env';
 import { requireAuth } from './middleware';
@@ -194,6 +194,7 @@ interface ImageGenerateBody {
   n?: unknown;
   background?: unknown;
   output_format?: unknown;
+  model?: unknown;
 }
 
 const ALLOWED_SIZES = new Set(['1024x1024', '1024x1536', '1536x1024', 'auto']);
@@ -211,20 +212,44 @@ const COST_MICRO_USD_BY_QUALITY: Record<string, number> = {
   high: 167_000, // ~$0.167
 };
 
+// v0.1.61: Aliyun Tongyi Wanxiang (DashScope) cost estimates. Public
+// pricing is in CNY/image and varies by model — wanx2.1-t2i-turbo is
+// roughly ¥0.14/image (~$0.020) and wanx2.1-t2i-plus ~¥0.40 (~$0.057).
+// Higher than PPIO's `low` tier but uniformly faster (5-15s vs 60-120s
+// of GPT Image 2 under load) and far more reliable for Chinese prompts.
+const COST_MICRO_USD_BY_WANX_MODEL: Record<string, number> = {
+  'wanx2.1-t2i-turbo': 20_000, // ~$0.020/image
+  'wanx2.1-t2i-plus': 57_000, // ~$0.057/image
+};
+
 interface PPIOImageResponse {
   images?: string[];
   error?: { message?: string } | string;
 }
 
-tools.post('/tools/image_generate', async (c) => {
-  const apiKey = c.env.PPIO_API_KEY;
-  if (!apiKey) {
-    return c.json(
-      { error: 'image_generate not configured on this server' },
-      503,
-    );
-  }
+interface WanxSubmitResponse {
+  output?: {
+    task_id?: string;
+    task_status?: string;
+  };
+  code?: string;
+  message?: string;
+  request_id?: string;
+}
 
+interface WanxTaskResponse {
+  output?: {
+    task_id?: string;
+    task_status?: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELED' | 'UNKNOWN';
+    results?: Array<{ url?: string; code?: string; message?: string }>;
+    code?: string;
+    message?: string;
+  };
+  code?: string;
+  message?: string;
+}
+
+tools.post('/tools/image_generate', async (c) => {
   const body = (await c.req.json().catch(() => null)) as ImageGenerateBody | null;
   if (!body) return c.json({ error: 'invalid json body' }, 400);
 
@@ -256,6 +281,29 @@ tools.post('/tools/image_generate', async (c) => {
 
   const rawN = Number(body.n);
   const n = Number.isFinite(rawN) ? Math.max(1, Math.min(4, Math.floor(rawN))) : 1;
+
+  // v0.1.61: route by model id.
+  //   - 'gpt-image-2' (default for back-compat) → PPIO synchronous API
+  //   - 'wanx2.1-t2i-turbo' / 'wanx2.1-t2i-plus' → Aliyun DashScope async
+  //
+  // Each branch normalizes to the same `{prompt, urls, model, size, quality}`
+  // response shape so the client tool handler is provider-agnostic.
+  const requestedModel =
+    typeof body.model === 'string' ? body.model : 'gpt-image-2';
+  const isWanx = requestedModel.startsWith('wanx');
+
+  if (isWanx) {
+    return handleWanx(c, requestedModel, prompt, size, n);
+  }
+
+  // Default path: PPIO GPT Image 2.
+  const apiKey = c.env.PPIO_API_KEY;
+  if (!apiKey) {
+    return c.json(
+      { error: 'image_generate not configured on this server' },
+      503,
+    );
+  }
 
   // Cap at 120s. v0.1.57: live measurement on prod showed simple
   // prompts ("a red apple on a white table") landing at exactly 60s
@@ -374,5 +422,208 @@ tools.post('/tools/image_generate', async (c) => {
     n: urls.length,
   });
 });
+
+// =============================================================================
+// Aliyun Tongyi Wanxiang (DashScope) — fallback image-gen provider, v0.1.61.
+//
+// Why we added this: PPIO's GPT Image 2 is excellent for English prompts but
+// degrades sharply on busy days — we measured 75s → 126s+ within 24 hours
+// for the same simple prompt. Cloudflare's 100s subrequest cap means we
+// physically can't wait longer. Tongyi Wanxiang is the same image quality
+// tier (turbo gives gpt-image-2-low results in ~5-10s) and uses an async
+// task API so the wait time on each individual subrequest stays bounded.
+//
+// Wire (DashScope docs 2026-04):
+//   POST https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis
+//   Header: X-DashScope-Async: enable
+//   Body: { model, input: { prompt }, parameters: { n, size? } }
+//   → { output: { task_id, task_status: 'PENDING' } }
+//
+//   GET https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}
+//   → { output: { task_status: 'SUCCEEDED'|'FAILED'|..., results: [{url}] } }
+//
+// We poll every 1.5s for up to ~80s (well inside the Workers subrequest
+// cap; turbo finishes in 5-10s, plus in 15-30s, so the upper bound only
+// kicks in on a wedged DashScope job).
+//
+// Auth: DASHSCOPE_API_KEY if set; otherwise falls back to QWEN_API_KEY,
+// because DashScope issues a single API key that works for both chat
+// and image. Most users have only QWEN_API_KEY set from the chat catalog,
+// and we don't want to make them go fish for "another" key that's the
+// same string.
+// =============================================================================
+
+async function handleWanx(
+  c: Context<AppContext>,
+  model: string,
+  prompt: string,
+  size: string,
+  n: number,
+) {
+  const apiKey =
+    (c.env as { DASHSCOPE_API_KEY?: string }).DASHSCOPE_API_KEY ??
+    c.env.QWEN_API_KEY;
+  if (!apiKey) {
+    return c.json(
+      { error: 'wanx image_generate not configured (set DASHSCOPE_API_KEY or QWEN_API_KEY)' },
+      503,
+    );
+  }
+
+  // DashScope wanx accepts size as e.g. "1024*1024" (asterisk, NOT 'x').
+  // We accept the same gpt-image-2-style sizes from the client and
+  // translate. 'auto' falls back to 1024*1024.
+  const wanxSize =
+    size === '1024x1024' || size === 'auto'
+      ? '1024*1024'
+      : size === '1024x1536'
+        ? '1024*1536'
+        : size === '1536x1024'
+          ? '1536*1024'
+          : '1024*1024';
+
+  // Step 1 — submit. AbortController ceiling 30s for the submit alone;
+  // submit should be <2s, this just guards against a stuck DNS / TLS.
+  const submitCtrl = new AbortController();
+  const submitTimer = setTimeout(() => submitCtrl.abort(), 30_000);
+  let submitRes: Response;
+  try {
+    submitRes = await fetch(
+      'https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+          'X-DashScope-Async': 'enable',
+        },
+        body: JSON.stringify({
+          model,
+          input: { prompt },
+          parameters: { n: Math.max(1, Math.min(4, n)), size: wanxSize },
+        }),
+        signal: submitCtrl.signal,
+      },
+    );
+  } catch (err) {
+    const aborted = (err as { name?: string }).name === 'AbortError';
+    console.error('wanx submit failed', { aborted, err });
+    return c.json(
+      {
+        error: aborted ? 'wanx submit timed out' : 'wanx submit unreachable',
+      },
+      502,
+    );
+  } finally {
+    clearTimeout(submitTimer);
+  }
+
+  if (submitRes.status === 401 || submitRes.status === 403) {
+    return c.json({ error: 'wanx upstream auth failed' }, 502);
+  }
+  if (submitRes.status === 429) {
+    return c.json({ error: 'wanx rate limited, retry later' }, 429);
+  }
+  if (!submitRes.ok) {
+    const text = await submitRes.text().catch(() => '');
+    return c.json(
+      { error: `wanx submit HTTP ${submitRes.status}`, detail: text.slice(0, 300) },
+      502,
+    );
+  }
+
+  const submit = (await submitRes.json()) as WanxSubmitResponse;
+  const taskId = submit.output?.task_id;
+  if (!taskId) {
+    return c.json(
+      {
+        error: 'wanx submit returned no task_id',
+        detail: (submit.message ?? submit.code ?? '').slice(0, 300),
+      },
+      502,
+    );
+  }
+
+  // Step 2 — poll. 80s ceiling; turbo typically 5-10s, plus 15-30s. We
+  // keep total subrequest count well under Cloudflare's 50/req limit
+  // (80s / 1.5s = ~53 polls worst-case → tighten to 1.8s to stay below).
+  const POLL_INTERVAL_MS = 1_800;
+  const POLL_DEADLINE_MS = 80_000;
+  const startedAt = Date.now();
+  let urls: string[] = [];
+  let lastStatus = 'PENDING';
+  let lastError = '';
+  while (Date.now() - startedAt < POLL_DEADLINE_MS) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    const taskRes = await fetch(
+      `https://dashscope.aliyuncs.com/api/v1/tasks/${taskId}`,
+      { headers: { Authorization: `Bearer ${apiKey}` } },
+    ).catch((e) => {
+      console.warn('wanx poll fetch errored', e);
+      return null;
+    });
+    if (!taskRes || !taskRes.ok) continue;
+    const task = (await taskRes.json()) as WanxTaskResponse;
+    lastStatus = task.output?.task_status ?? lastStatus;
+    if (task.output?.task_status === 'SUCCEEDED') {
+      urls = (task.output.results ?? [])
+        .map((r) => r.url)
+        .filter((u): u is string => typeof u === 'string' && u.length > 0);
+      break;
+    }
+    if (
+      task.output?.task_status === 'FAILED' ||
+      task.output?.task_status === 'CANCELED'
+    ) {
+      lastError =
+        task.output?.message ??
+        (task.output?.results ?? [])[0]?.message ??
+        task.message ??
+        '';
+      break;
+    }
+    // Otherwise PENDING/RUNNING — keep polling.
+  }
+
+  if (urls.length === 0) {
+    return c.json(
+      {
+        error:
+          lastStatus === 'FAILED' || lastStatus === 'CANCELED'
+            ? `wanx task ${lastStatus.toLowerCase()}`
+            : 'wanx polling timed out',
+        detail: (lastError || `last status: ${lastStatus}`).slice(0, 300),
+      },
+      502,
+    );
+  }
+
+  // Best-effort usage log — same shape as gpt-image-2 path so admin
+  // dashboards can sum image-gen activity across providers without a
+  // schema change.
+  const userId = c.get('userId');
+  const perImageCost = COST_MICRO_USD_BY_WANX_MODEL[model] ?? 30_000;
+  const cost = perImageCost * urls.length;
+  c.executionCtx.waitUntil(
+    c.env.DB
+      .prepare(
+        `INSERT INTO usage_log
+           (user_id, model, prompt_tokens, completion_tokens, total_tokens, cost_micro_usd, conversation_id)
+         VALUES (?, ?, 0, 0, 0, ?, NULL)`,
+      )
+      .bind(userId, model, cost)
+      .run()
+      .catch((err) => console.error('wanx usage_log insert failed', err)),
+  );
+
+  return c.json({
+    prompt,
+    urls,
+    model,
+    size,
+    quality: 'auto', // wanx doesn't expose a quality tier; echo something stable
+    n: urls.length,
+  });
+}
 
 export default tools;
