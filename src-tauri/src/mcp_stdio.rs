@@ -202,6 +202,65 @@ fn push_message_capped(q: &mut VecDeque<String>, msg: String) -> u64 {
     dropped
 }
 
+/// Should this MCP command be re-routed through `cmd.exe /c` on Windows?
+///
+/// Background: Rust's `std::process::Command` on Windows calls
+/// `CreateProcessW`, which is **not** cmd.exe — it doesn't consult
+/// `PATHEXT` to resolve `npx` → `npx.cmd`, and won't interpret `.cmd` /
+/// `.bat` files at all (those are batch scripts, not native executables).
+/// The first wave of v0.1.51's MCP work hit this: even with Node.js on
+/// PATH, `Command::new("npx")` failed with "program not found" because
+/// the kernel can't launch the bare-extensionless `npx` shim file.
+///
+/// Fix: detect node-ecosystem shim names + explicit `.cmd`/`.bat`/`.ps1`
+/// paths and re-route them through `cmd.exe /c`, which does PATHEXT
+/// resolution and runs batch files. Native `.exe` paths keep the direct
+/// spawn path — wrapping every command in cmd.exe would inflict its
+/// quoting rules on invocations that work fine today.
+///
+/// On non-Windows this always returns false (the .cmd/.bat extensions
+/// don't exist as a category, and Unix has no PATHEXT confusion).
+///
+/// Exposed at module scope so the unit tests below can pin its behavior
+/// without spawning processes.
+fn needs_cmd_wrapper(command: &str) -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+    let lower = command.to_ascii_lowercase();
+    // Strip any directory prefix so `C:\Program Files\nodejs\npx` matches
+    // the bare `npx` shim list. We tolerate both backslash and forward
+    // slash because Windows accepts either as a separator and users
+    // sometimes paste in Unix-style paths.
+    let stripped = lower
+        .rsplit_once('\\')
+        .map(|(_, t)| t)
+        .unwrap_or(&lower);
+    let stripped = stripped.rsplit_once('/').map(|(_, t)| t).unwrap_or(stripped);
+
+    // Node-ecosystem and Python-via-uv shim names. Generous because the
+    // cost of being wrong (cmd.exe wraps a native .exe by mistake) is
+    // ~10 ms of cmd.exe startup overhead, vs. the cost of being too
+    // narrow (a popular MCP fails to spawn with a confusing error).
+    if matches!(
+        stripped,
+        "npx"
+            | "npm"
+            | "node"
+            | "pnpm"
+            | "yarn"
+            | "uvx"
+            | "uv"
+            | "deno"
+            | "bun"
+    ) {
+        return true;
+    }
+    // Explicit .cmd / .bat paths must go through cmd.exe regardless.
+    // .ps1 too, since CreateProcessW won't run PowerShell scripts either.
+    stripped.ends_with(".cmd") || stripped.ends_with(".bat") || stripped.ends_with(".ps1")
+}
+
 #[tauri::command]
 pub async fn mcp_stdio_spawn(
     state: State<'_, McpStdioState>,
@@ -224,9 +283,33 @@ pub async fn mcp_stdio_spawn(
     let cmd_name = args.command.clone();
     let cmd_args = args.args.clone().unwrap_or_default();
 
-    let mut cmd = tokio::process::Command::new(&args.command);
-    cmd.args(&cmd_args)
-        .stdin(std::process::Stdio::piped())
+    // Windows .cmd / .bat shim handling (v0.1.54). See `needs_cmd_wrapper`
+    // below for the full backstory; tl;dr Rust's `Command::new("npx")` on
+    // Windows refuses to launch `npx.cmd` (CreateProcessW doesn't do
+    // PATHEXT resolution and won't interpret batch files), so we re-route
+    // shim names + .cmd/.bat through `cmd.exe /c`.
+    let needs_cmd_wrapper_flag = needs_cmd_wrapper(&args.command);
+
+    let mut cmd = if needs_cmd_wrapper_flag {
+        // `cmd /c <name> <args...>` — cmd.exe re-resolves the shim name
+        // via PATHEXT (so `npx` → `npx.cmd`) and interprets it. We pass
+        // the original args verbatim; cmd.exe's quoting rules apply, but
+        // every MCP we ship today either takes flag args (`-y
+        // @scope/pkg`) or absolute paths, neither of which trip cmd
+        // quoting up. If a future MCP needs literal special-char args
+        // we'd switch to a Powershell wrapper, but we haven't seen that.
+        let mut c = tokio::process::Command::new("cmd");
+        c.arg("/c").arg(&args.command);
+        for a in &cmd_args {
+            c.arg(a);
+        }
+        c
+    } else {
+        let mut c = tokio::process::Command::new(&args.command);
+        c.args(&cmd_args);
+        c
+    };
+    cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
@@ -538,5 +621,72 @@ mod tests {
         append_stderr_capped(&mut buf, &[1, 2, 3]);
         assert!(buf.len() <= STDERR_CAP_BYTES);
         assert_eq!(&buf[buf.len() - 3..], &[1, 2, 3]);
+    }
+
+    // The needs_cmd_wrapper tests are gated to Windows because the function
+    // unconditionally returns false on other targets (Unix has no PATHEXT
+    // confusion + doesn't recognise .cmd/.bat as a category). On Windows
+    // they pin the v0.1.54 fix that re-routed `npx` and friends through
+    // cmd.exe so MCPs spawned via Node.js shims actually launch.
+    #[cfg(windows)]
+    #[test]
+    fn needs_cmd_wrapper_recognises_node_shims() {
+        assert!(needs_cmd_wrapper("npx"));
+        assert!(needs_cmd_wrapper("npm"));
+        assert!(needs_cmd_wrapper("node"));
+        assert!(needs_cmd_wrapper("pnpm"));
+        assert!(needs_cmd_wrapper("yarn"));
+        assert!(needs_cmd_wrapper("deno"));
+        assert!(needs_cmd_wrapper("bun"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn needs_cmd_wrapper_recognises_uv_shims() {
+        assert!(needs_cmd_wrapper("uvx"));
+        assert!(needs_cmd_wrapper("uv"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn needs_cmd_wrapper_strips_directory_prefix() {
+        // Users sometimes paste in the absolute path winget recorded.
+        // Both directory separators must be tolerated.
+        assert!(needs_cmd_wrapper("C:\\Program Files\\nodejs\\npx"));
+        assert!(needs_cmd_wrapper("C:/Program Files/nodejs/npx"));
+        assert!(needs_cmd_wrapper(
+            "C:\\Users\\qfu\\AppData\\Roaming\\npm\\npx.cmd"
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn needs_cmd_wrapper_recognises_explicit_cmd_bat_ps1() {
+        assert!(needs_cmd_wrapper("foo.cmd"));
+        assert!(needs_cmd_wrapper("foo.bat"));
+        assert!(needs_cmd_wrapper("foo.ps1"));
+        assert!(needs_cmd_wrapper("FOO.CMD")); // case-insensitive
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn needs_cmd_wrapper_passes_through_native_exes() {
+        // .exe paths are launchable by CreateProcessW directly; wrapping
+        // them in cmd.exe would just slow them down + invite quoting bugs.
+        assert!(!needs_cmd_wrapper("python.exe"));
+        assert!(!needs_cmd_wrapper("C:\\Windows\\System32\\cmd.exe"));
+        assert!(!needs_cmd_wrapper("git"));
+        assert!(!needs_cmd_wrapper("rust-analyzer"));
+        assert!(!needs_cmd_wrapper(""));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn needs_cmd_wrapper_is_always_false_on_unix() {
+        // No PATHEXT + no batch files; Unix kernels execute shebangs
+        // directly. The Windows fix should never alter behavior here.
+        assert!(!needs_cmd_wrapper("npx"));
+        assert!(!needs_cmd_wrapper("foo.cmd"));
+        assert!(!needs_cmd_wrapper("/usr/local/bin/uvx"));
     }
 }
