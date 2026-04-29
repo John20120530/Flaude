@@ -335,6 +335,13 @@ interface AppState {
   // not persisted because every state transition is re-derived at runtime.
   // ---------------------------------------------------------------------------
   lastSyncAt: number | null;
+  /**
+   * One-shot recovery flag for the v0.1.56 Design-mode-loss bug. See
+   * `onRehydrateStorage` for the rescue logic; persisted so the rescue
+   * only runs once per device, even across upgrades after the rescue
+   * itself shipped.
+   */
+  _designRecoveryRanV0156?: boolean;
   dirtyConversationIds: string[];
   pendingDeletions: string[];
   /**
@@ -1634,7 +1641,18 @@ export const useAppStore = create<AppState>()(
               title: p.title,
               // The server shouldn't ever hand us a mode we don't know about,
               // but if it does (legacy row, futureproofing), fall back to chat.
-              mode: (p.mode === 'chat' || p.mode === 'code' ? p.mode : 'chat') as WorkMode,
+              //
+              // v0.1.56 bugfix: this whitelist used to be `('chat' || 'code')`
+              // and silently rewrote every `design` conversation to `chat` on
+              // every sync pull. A user with 4 Design convs noticed them
+              // disappearing into the Chat tab after a restart — Design 4 → 0
+              // matched Chat +4 exactly. The whitelist now includes 'design',
+              // and the existing-conv branch (below) preserves any mode the
+              // server still has on a row it doesn't recognise (so a future
+              // 'cowork-2' style mode wouldn't get clobbered either).
+              mode: (p.mode === 'chat' || p.mode === 'code' || p.mode === 'design'
+                ? p.mode
+                : (existing?.mode ?? 'chat')) as WorkMode,
               modelId: p.modelId ?? existing?.modelId ?? '',
               projectId: p.projectId ?? undefined,
               messages,
@@ -1952,6 +1970,7 @@ export const useAppStore = create<AppState>()(
         // (user-visible bug: "I deleted it but it came back"). syncState /
         // syncError are deliberately transient.
         lastSyncAt: s.lastSyncAt,
+        _designRecoveryRanV0156: s._designRecoveryRanV0156,
         dirtyConversationIds: s.dirtyConversationIds,
         pendingDeletions: s.pendingDeletions,
         dirtyProjectIds: s.dirtyProjectIds,
@@ -2070,6 +2089,57 @@ export const useAppStore = create<AppState>()(
               : m,
           );
         }
+        // v0.1.56 one-time recovery — rescue any Design conversations that
+        // got silently re-typed to 'chat' by the now-fixed sync pull
+        // whitelist (see `mode: (p.mode === 'chat' || ...)` above before
+        // v0.1.56). Detection is conservative on purpose: a conversation
+        // whose stored `mode` is 'chat' but whose model id resolves to
+        // a Design-ecosystem model (image-gen, vision, or one users
+        // typically pick in Design — Qwen3-VL / Claude Opus / Sonnet via
+        // PPIO) is overwhelmingly likely to be a misclassified Design
+        // conv. Other heuristics (title contains 设计/画/海报/poster/
+        // landing/design) catch text-prompted Design convs whose model
+        // id is generic. False positives just put a chat-with-image
+        // conversation into Design — slightly weird but harmless and
+        // can be re-tagged manually. We only run this once per device
+        // (gated by `_designRecoveryRanV0156`) so subsequent app starts
+        // don't keep re-flipping if the user manually moved a conv back.
+        if (!state._designRecoveryRanV0156 && Array.isArray(state.conversations)) {
+          const designSignalModel = (modelId: string | undefined) => {
+            if (!modelId) return false;
+            // Vision-only / image-gen models — only Design uses these.
+            if (modelId.startsWith('qwen3-vl-')) return true;
+            if (modelId === 'gpt-image-2') return true;
+            return false;
+          };
+          const designSignalTitle = (title: string | undefined) => {
+            if (!title) return false;
+            const t = title.toLowerCase();
+            return (
+              /画|海报|设计稿|落地页|poster|landing|design|hero/.test(title) ||
+              /画一/.test(title) ||
+              t.includes('design')
+            );
+          };
+          let recovered = 0;
+          state.conversations = state.conversations.map((c) => {
+            if (c.mode !== 'chat') return c;
+            if (designSignalModel(c.modelId) || designSignalTitle(c.title)) {
+              recovered++;
+              return { ...c, mode: 'design' as WorkMode };
+            }
+            return c;
+          });
+          state._designRecoveryRanV0156 = true;
+          // Resetting lastSyncAt so the next /sync/pull goes since=0 and
+          // the server's authoritative mode wins on any rows we missed
+          // with the heuristic above. Cheap — pull is a single GET that
+          // returns the user's full conversation index, typically <1MB.
+          if (recovered > 0) {
+            state.lastSyncAt = null;
+          }
+        }
+
         // Idle auto-logout: if the user's been gone longer than the
         // timeout, scrub their auth on rehydrate so they hit the login
         // screen instead of finding the app pre-warmed with their session.
