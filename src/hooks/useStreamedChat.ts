@@ -406,7 +406,29 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
       flushToolCalls();
 
       // Normal termination — nothing more to do.
-      if (finishReason !== 'tool_calls' || toolCallsMap.size === 0) return;
+      if (finishReason !== 'tool_calls' || toolCallsMap.size === 0) {
+        // v0.1.64: when the stream finishes with finish='stop' / 'error'
+        // but tool_call deltas had been streaming, the tool_calls are
+        // partial (args may still be `{}`) and never get dispatched.
+        // Without cleanup the message keeps a tool_call entry whose
+        // status defaults to 'pending' → UI shows a forever-spinning
+        // 「等待」 chip, and the next user prompt serializes an orphan
+        // assistant.tool_calls (wireFormat strips them in v0.1.26 but
+        // the visible UI bug is louder). Mark each as errored so the
+        // user sees a ✗ instead of a clock, and the conversation can
+        // continue cleanly.
+        if (toolCallsMap.size > 0) {
+          const erroredCalls: ToolCall[] = [...toolCallsMap.values()].map(
+            (tc) => ({
+              ...tc,
+              status: 'error' as const,
+              error: '工具调用未完成（流被中断）',
+            }),
+          );
+          patchLastMessage(conversation.id, { toolCalls: erroredCalls });
+        }
+        return;
+      }
 
       // ---- Tool round-trip ----
       if (depth >= MAX_TOOL_ROUNDTRIPS) {
