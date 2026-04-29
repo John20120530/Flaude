@@ -127,7 +127,9 @@ export interface ProjectSource {
 export type ProviderId =
   | 'deepseek'
   | 'qwen'
-  | 'zhipu'
+  // 'zhipu' removed in v0.1.51 — kept out of the union so any stale modelId
+  // string that still references glm-* fails to type-narrow at the routing
+  // layer instead of silently being sent to a defunct provider.
   | 'moonshot'
   | 'minimax'
   | 'baichuan'

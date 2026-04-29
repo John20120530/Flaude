@@ -26,7 +26,8 @@ export interface Env {
   // model's key is missing.
   DEEPSEEK_API_KEY?: string;
   QWEN_API_KEY?: string;      // DashScope (Alibaba). Get at https://dashscope.console.aliyun.com
-  ZHIPU_API_KEY?: string;     // Zhipu BigModel. Get at https://bigmodel.cn
+  // ZHIPU_API_KEY removed in v0.1.51 (Zhipu provider dropped). Leaving the
+  // wrangler secret in production is harmless — nothing references it.
   MOONSHOT_API_KEY?: string;  // Moonshot Kimi. Get at https://platform.moonshot.cn
 
   // Tool provider keys.

@@ -15,7 +15,7 @@
  */
 import type { Env } from './env';
 
-export type ProviderId = 'deepseek' | 'qwen' | 'zhipu' | 'moonshot' | 'ppio';
+export type ProviderId = 'deepseek' | 'qwen' | 'moonshot' | 'ppio';
 
 export interface ModelPricing {
   /** Input tokens: cost in micro-USD per 1_000 tokens. */
@@ -122,27 +122,10 @@ const QWEN: ProviderConfig = {
   },
 };
 
-// Zhipu GLM via BigModel. Their OpenAI-compatible endpoint under /paas/v4 is
-// the one to target; the older /api/paas/v3 one uses their own schema.
-//
-// Pricing as of 2026-04 (rough, converted from CNY @ ~¥7/$):
-//   glm-4-air  : input  ¥0.5 / 1M  ≈ $0.071 → 71 micros/1k
-//                output ¥0.5 / 1M  ≈ $0.071 → 71 micros/1k
-//   glm-4-plus : input  ¥5   / 1M  ≈ $0.714 → 714 micros/1k
-//                output ¥5   / 1M  ≈ $0.714 → 714 micros/1k
-//   glm-4-flash: free tier — still bill at a nominal rate so quota math works.
-//
-// Re-check upstream before production.
-const ZHIPU: ProviderConfig = {
-  id: 'zhipu',
-  baseUrl: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
-  keyEnvName: 'ZHIPU_API_KEY',
-  models: {
-    'glm-4-flash': { inputMicroUsdPer1k:   0, outputMicroUsdPer1k:   0 },
-    'glm-4-air':   { inputMicroUsdPer1k:  71, outputMicroUsdPer1k:  71 },
-    'glm-4-plus':  { inputMicroUsdPer1k: 714, outputMicroUsdPer1k: 714 },
-  },
-};
+// Zhipu GLM removed in v0.1.51 — see client-side providers.ts for rationale.
+// Old ZHIPU_API_KEY env binding can be left in wrangler.toml; it just won't be
+// referenced by any model in MODEL_INDEX, which means resolveModel() will reject
+// any glm-* request before it even checks for a key.
 
 // Moonshot Kimi. Standard OpenAI-compatible at /v1/chat/completions. The
 // model name encodes context window (8k / 32k / 128k) — clients pick the
@@ -217,7 +200,7 @@ const PPIO: ProviderConfig = {
   },
 };
 
-const PROVIDERS: ProviderConfig[] = [DEEPSEEK, QWEN, ZHIPU, MOONSHOT, PPIO];
+const PROVIDERS: ProviderConfig[] = [DEEPSEEK, QWEN, MOONSHOT, PPIO];
 
 // Flat lookup: model string → (provider, pricing). Built once at module load.
 const MODEL_INDEX: Record<string, { provider: ProviderConfig; pricing: ModelPricing }> = {};

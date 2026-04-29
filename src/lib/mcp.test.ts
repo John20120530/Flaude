@@ -10,7 +10,12 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { StdioTransport, type StdioIO, type StdioRecvResult } from './mcp';
+import {
+  StdioTransport,
+  mcpErrorMessage,
+  type StdioIO,
+  type StdioRecvResult,
+} from './mcp';
 
 /**
  * Manually-driven IO. `send` records every payload; `recv` blocks on a
@@ -182,6 +187,69 @@ describe('StdioTransport', () => {
 
     await expect(p1).rejects.toThrow(/已退出.*code=1/);
     await expect(p2).rejects.toThrow(/已退出.*code=1/);
+  });
+
+  it('appends the stderr tail to the exit error so users see why', async () => {
+    // The whole point of the v0.1.51 fix — when an MCP child dies the user
+    // saw "exited code=1" and nothing else, even though the child had been
+    // shouting "FILESYSTEM_ROOT not set" to stderr the whole time.
+    const fake = makeFakeIO();
+    const t = new StdioTransport(fake.io);
+    const p = t.request('initialize', undefined, undefined);
+    await Promise.resolve();
+
+    const stderrText = [
+      'line 1 noise',
+      'line 2 noise',
+      'line 3 noise',
+      'line 4 noise',
+      'line 5 noise',
+      'line 6 noise',
+      'line 7 noise',
+      'Error: FILESYSTEM_ROOT environment variable is required',
+    ].join('\n');
+
+    fake.push({
+      messages: [],
+      running: false,
+      code: 1,
+      killed: false,
+      dropped_messages: 0,
+      stderr: stderrText,
+    });
+
+    await expect(p).rejects.toThrow(/FILESYSTEM_ROOT/);
+    // Must NOT include the noise we explicitly trimmed (only last 6 lines).
+    await expect(p).rejects.toThrow(/stderr 末尾/);
+  });
+});
+
+describe('mcpErrorMessage', () => {
+  it('returns the message of an Error', () => {
+    expect(mcpErrorMessage(new Error('boom'))).toBe('boom');
+  });
+
+  it('returns a bare string thrown value verbatim (Tauri invoke shape)', () => {
+    // This is THE case that was silently breaking. Tauri 2's `invoke` rejects
+    // with the raw `Err(String)` payload, NOT an Error wrapper, so the old
+    // code's `(e as Error).message` got `undefined`.
+    expect(mcpErrorMessage('启动 MCP 进程失败 (npx): file not found')).toBe(
+      '启动 MCP 进程失败 (npx): file not found',
+    );
+  });
+
+  it('reads .message off plain objects when present', () => {
+    expect(mcpErrorMessage({ message: 'hi', code: 42 })).toBe('hi');
+  });
+
+  it('falls back to JSON for objects without a .message', () => {
+    expect(mcpErrorMessage({ code: 42 })).toBe('{"code":42}');
+  });
+
+  it('handles null / undefined / numbers', () => {
+    expect(mcpErrorMessage(null)).toBe('null');
+    expect(mcpErrorMessage(undefined)).toBe('undefined');
+    expect(mcpErrorMessage(42)).toBe('42');
   });
 
   it('rejects all pending requests when the IPC layer fails', async () => {

@@ -35,7 +35,6 @@ import { useStreamedChat } from '@/hooks/useStreamedChat';
 import { composeSystemPrompt } from '@/lib/systemPrompt';
 import { DESIGN_BASE_PROMPT } from '@/config/designSystemPrompt';
 import { allDesignBlocks } from '@/lib/designExtract';
-import { Sparkles, Zap } from 'lucide-react';
 
 export default function DesignView() {
   const { conversationId } = useParams();
@@ -47,8 +46,6 @@ export default function DesignView() {
   const newConversation = useAppStore((s) => s.newConversation);
   const setActiveConversation = useAppStore((s) => s.setActiveConversation);
   const setConversationSummary = useAppStore((s) => s.setConversationSummary);
-  const setConversationModel = useAppStore((s) => s.setConversationModel);
-  const setModelForMode = useAppStore((s) => s.setModelForMode);
 
   const conversation = useMemo(
     () => conversations.find((c) => c.id === conversationId && c.mode === 'design'),
@@ -109,23 +106,10 @@ export default function DesignView() {
     [conversation]
   );
 
-  // Default for design is V4 Pro — we surface a "切到 Flash 省钱" hint so
-  // users who don't need flagship-level polish can knock the cost down ~12x
-  // by switching. Hidden for non-Pro models (the user already escaped the
-  // default), and hidden once they've sent at least one message in this
-  // conversation (the hint is decision-time UX, not a permanent banner).
-  const showFlashHint =
-    conversation?.modelId === 'deepseek-v4-pro' &&
-    (conversation?.messages.length ?? 0) === 0;
-
-  const switchToFlash = () => {
-    if (!conversation) return;
-    setConversationModel(conversation.id, 'deepseek-chat');
-    // Update the per-mode default too so the next new design conversation
-    // starts on Flash without the user having to click again. They can flip
-    // back from the TopBar picker if they regret it.
-    setModelForMode('design', 'deepseek-chat');
-  };
+  // (v0.1.51) The "switch to Flash to save money" banner was removed — model
+  // pricing tradeoffs are now surfaced inline in the TopBar 3-slot picker
+  // (语言 / 视觉 / 生图), and most Design users in v0.1.49+ are routing through
+  // Claude or Qwen anyway, where the V4-Pro-vs-Flash dichotomy doesn't apply.
 
   if (!conversation) {
     return <div className="flex-1" />;
@@ -135,24 +119,6 @@ export default function DesignView() {
     <div className="flex-1 flex min-h-0">
       {/* Left: chat column */}
       <div className="w-[440px] shrink-0 flex flex-col min-h-0 border-r border-claude-border dark:border-night-border bg-claude-surface dark:bg-night-surface">
-        {showFlashHint && (
-          <div className="px-3 py-2 border-b border-claude-border dark:border-night-border bg-amber-50 dark:bg-amber-950/30 text-xs text-amber-800 dark:text-amber-200 flex items-start gap-2">
-            <Sparkles className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-            <div className="flex-1">
-              当前用 <strong>DeepSeek V4 Pro</strong> —— 设计稿质量更高，但每 1M tokens 约 $1.74。
-              简单设计可以
-              <button
-                type="button"
-                onClick={switchToFlash}
-                className="mx-1 underline decoration-dotted hover:decoration-solid inline-flex items-center gap-0.5"
-              >
-                <Zap className="w-3 h-3" />
-                切到 V4 Flash
-              </button>
-              省 ~12 倍 token 费。
-            </div>
-          </div>
-        )}
         <MessageList
           messages={conversation.messages}
           conversationId={conversation.id}
