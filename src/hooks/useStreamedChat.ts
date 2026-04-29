@@ -433,8 +433,18 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
       };
       const newHistory: Message[] = [...history, assistantTurn];
 
-      // Execute every tool, append a tool message per result, update UI live.
-      for (const tc of toolCalls) {
+      // Execute one tool call to completion, returning the tool message
+      // that should be appended to history. Refactored out of the loop
+      // body in v0.1.50 so we can run multiple in parallel for the
+      // all-subtasks case without duplicating any of the hook / plan-
+      // mode / argument-parsing logic.
+      //
+      // IMPORTANT: this closure captures `toolCalls` (the live array)
+      // so `patchLastMessage` updates show all tool statuses correctly
+      // whether we run sequentially or concurrently. We mutate `tc` in
+      // place (status, result, error) — the array is the single source
+      // of truth for the UI.
+      const executeOneTool = async (tc: ToolCall): Promise<Message> => {
         tc.status = 'running';
         patchLastMessage(conversation.id, { toolCalls: [...toolCalls] });
 
@@ -521,10 +531,6 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
               });
             },
             readSkillAsset: ({ skillName, assetPath }) => {
-              // Look up the skill by `name` (not title — the agent
-              // sees `name` in the system-prompt manifest). Then find
-              // the asset by relative path. Returns null on miss; the
-              // tool wrapper turns null into a clear error message.
               const skills = useAppStore.getState().skills;
               const skill = skills.find((s) => s.name === skillName);
               if (!skill?.assets) return null;
@@ -536,11 +542,7 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
           tc.status = 'success';
           tc.result = resultText;
 
-          // Post-tool-use hooks. Run after a successful tool execution.
-          // Output is appended to the tool result text so the agent sees
-          // it in the next round-trip (auto-typecheck output, lint
-          // warnings, etc.). Errors here don't fail the tool — the tool
-          // already succeeded; the hook is supplementary.
+          // Post-tool-use hooks.
           if (shouldFireToolHooks(tc.name)) {
             for (const h of enabledHooks) {
               if (h.event !== 'post_tool_use') continue;
@@ -558,15 +560,65 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
         }
         patchLastMessage(conversation.id, { toolCalls: [...toolCalls] });
 
-        const toolMsg: Message = {
+        return {
           id: uid('msg'),
           role: 'tool',
           content: ok ? resultText : `工具错误: ${resultText}`,
           toolCalls: [tc],
           createdAt: Date.now(),
         };
-        appendMessage(conversation.id, toolMsg);
-        newHistory.push(toolMsg);
+      };
+
+      // v0.1.50: parallel sub-agent dispatch.
+      // When the assistant emits MULTIPLE spawn_subtask calls in a
+      // single message and nothing else, run them concurrently — each
+      // subagent runs in its own conversation with its own context, so
+      // there's no shared state to serialize on. Concurrency is capped
+      // at MAX_PARALLEL_SUBTASKS to avoid hammering the upstream
+      // provider with N parallel turns; spillover runs sequentially.
+      //
+      // We require *all* tool calls to be spawn_subtask before
+      // parallelizing — mixing parallelizable and sequential tools in
+      // one batch would need a more careful runner (you can't run
+      // fs_write before its sibling spawn_subtask completes if the
+      // model intended a strict order). The model can always emit a
+      // pure-subtasks turn followed by a non-parallel turn; we don't
+      // lose any expressivity.
+      const allSubtasks =
+        toolCalls.length > 1 &&
+        toolCalls.every((tc) => tc.name === 'spawn_subtask');
+
+      const MAX_PARALLEL_SUBTASKS = 4;
+
+      if (allSubtasks) {
+        // Run in parallel, in batches of MAX_PARALLEL_SUBTASKS so the
+        // common 2-4 case is fully concurrent and the rare 5+ case
+        // doesn't fan out unboundedly.
+        const messages: Message[] = new Array(toolCalls.length);
+        for (let i = 0; i < toolCalls.length; i += MAX_PARALLEL_SUBTASKS) {
+          const batch = toolCalls.slice(i, i + MAX_PARALLEL_SUBTASKS);
+          const results = await Promise.all(
+            batch.map((tc) => executeOneTool(tc)),
+          );
+          for (let j = 0; j < results.length; j++) {
+            messages[i + j] = results[j]!;
+          }
+        }
+        // Append in submission order so the model sees results paired
+        // 1:1 with the tool_use ids it emitted (Anthropic + OpenAI both
+        // accept any order, but ordered is easier to reason about in
+        // logs and replays).
+        for (const m of messages) {
+          appendMessage(conversation.id, m);
+          newHistory.push(m);
+        }
+      } else {
+        // Sequential path — same as pre-v0.1.50 behavior.
+        for (const tc of toolCalls) {
+          const toolMsg = await executeOneTool(tc);
+          appendMessage(conversation.id, toolMsg);
+          newHistory.push(toolMsg);
+        }
       }
 
       // Start a fresh assistant message and recurse.

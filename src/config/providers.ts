@@ -273,6 +273,32 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = [
         capabilities: { tools: true, vision: true, reasoning: true, longContext: true },
         recommendedFor: ['code'],
       },
+      // v0.1.50: Extended Thinking variants. Functionally same model
+      // as Sonnet/Opus but with `thinking: enabled` injected at the
+      // Worker. Toggleable from Composer's 「深度思考」 button — see
+      // REASONER_PAIRS below.
+      // (No Haiku-thinking entry: Anthropic Haiku 4.5 doesn't support
+      // extended thinking.)
+      {
+        id: 'pa/claude-sonnet-4-6-thinking',
+        providerId: 'ppio',
+        displayName: 'Claude Sonnet 4.6 · Thinking',
+        description:
+          '深度思考模式（extended thinking）。模型先输出推理链再给答案；适合数学、代码、多步规划。同价 $3 / $15 per M tokens——budget 16k 思考 token 内不额外计费。',
+        contextWindow: 200_000,
+        capabilities: { tools: true, vision: true, reasoning: true, longContext: true },
+        recommendedFor: ['code'],
+      },
+      {
+        id: 'pa/claude-opus-4-6-thinking',
+        providerId: 'ppio',
+        displayName: 'Claude Opus 4.6 · Thinking',
+        description:
+          '顶配 Claude + 深度思考。最强推理 + 长文 + 难任务。$15 / $75 per M tokens。',
+        contextWindow: 200_000,
+        capabilities: { tools: true, vision: true, reasoning: true, longContext: true },
+        recommendedFor: ['code'],
+      },
     ],
   },
 ];
@@ -359,4 +385,12 @@ export const DESIGN_VISION_FALLBACK_MODEL = 'qwen3-vl-plus';
 export const REASONER_PAIRS: Record<string, string> = {
   'deepseek-chat': 'deepseek-reasoner',
   'deepseek-reasoner': 'deepseek-chat',
+  // v0.1.50: Claude extended-thinking variants. The `-thinking` suffix
+  // is stripped Worker-side by anthropicAdapter; the suffixed id is
+  // purely a client-side toggle marker. Haiku-4.5 has no thinking
+  // mode upstream, so it's not paired.
+  'pa/claude-sonnet-4-6': 'pa/claude-sonnet-4-6-thinking',
+  'pa/claude-sonnet-4-6-thinking': 'pa/claude-sonnet-4-6',
+  'pa/claude-opus-4-6': 'pa/claude-opus-4-6-thinking',
+  'pa/claude-opus-4-6-thinking': 'pa/claude-opus-4-6',
 };
