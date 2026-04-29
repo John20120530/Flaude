@@ -186,6 +186,17 @@ export async function* streamChat(req: ChatRequest): AsyncGenerator<StreamChunk>
           if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
             yield { reasoningDelta: delta.reasoning_content };
           }
+          // Anthropic Extended Thinking signature (v0.1.52). Surfaced by
+          // server/anthropicAdapter.translateStream from `signature_delta`
+          // events. Without persisting this on the assistant message,
+          // a 2nd send into the same Claude thinking conversation 400s on
+          // `messages[i].content[j].thinking.signature: Field required`.
+          if (
+            typeof delta.reasoning_signature === 'string' &&
+            delta.reasoning_signature.length > 0
+          ) {
+            yield { reasoningSignatureDelta: delta.reasoning_signature };
+          }
           // Tool call deltas
           if (Array.isArray(delta.tool_calls)) {
             for (const tc of delta.tool_calls) {

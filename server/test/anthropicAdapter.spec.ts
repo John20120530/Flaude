@@ -347,7 +347,7 @@ describe('translateRequest — extended thinking', () => {
     expect(out.top_p).toBeUndefined();
   });
 
-  it('translates assistant.reasoning_content into a leading thinking content block', () => {
+  it('translates assistant.reasoning_content into a leading thinking content block (with signature)', () => {
     const out = translateRequest({
       model: 'pa/claude-sonnet-4-6-thinking',
       messages: [
@@ -356,22 +356,57 @@ describe('translateRequest — extended thinking', () => {
           role: 'assistant',
           content: "Here's my answer.",
           reasoning_content: 'Step 1: ...\nStep 2: ...',
+          reasoning_signature: 'sig-base64-blob',
         },
         { role: 'user', content: 'now follow up' },
       ],
     });
     const asst = out.messages[1]!;
     expect(asst.role).toBe('assistant');
-    const blocks = asst.content as Array<{ type: string; thinking?: string; text?: string }>;
+    const blocks = asst.content as Array<{
+      type: string;
+      thinking?: string;
+      text?: string;
+      signature?: string;
+    }>;
     expect(blocks).toHaveLength(2);
     expect(blocks[0]).toEqual({
       type: 'thinking',
       thinking: 'Step 1: ...\nStep 2: ...',
+      signature: 'sig-base64-blob',
     });
     expect(blocks[1]).toEqual({ type: 'text', text: "Here's my answer." });
   });
 
-  it('preserves thinking block alongside tool_calls (thinking goes first)', () => {
+  it('drops the thinking block when reasoning_content has no signature (v0.1.51 legacy turns)', () => {
+    // Pre-v0.1.52 conversations recorded reasoning_content but never the
+    // matching signature. Anthropic 400s if a thinking block is sent without
+    // a signature, so for those legacy turns we drop the thinking block
+    // entirely — reasoning continuity is lost on the legacy turn but the
+    // request still goes through (instead of permanently failing).
+    const out = translateRequest({
+      model: 'pa/claude-sonnet-4-6-thinking',
+      messages: [
+        {
+          role: 'assistant',
+          content: 'Final answer.',
+          reasoning_content: 'Some pre-v0.1.52 reasoning',
+          // no reasoning_signature
+        },
+        { role: 'user', content: 'follow up' },
+      ],
+    });
+    const asst = out.messages[0]!;
+    // Should fall through to the plain-message branch with NO thinking block.
+    expect(typeof asst.content === 'string' || Array.isArray(asst.content)).toBe(
+      true,
+    );
+    if (Array.isArray(asst.content)) {
+      expect(asst.content.find((b) => b.type === 'thinking')).toBeUndefined();
+    }
+  });
+
+  it('preserves thinking block alongside tool_calls (thinking goes first, signature attached)', () => {
     const out = translateRequest({
       model: 'pa/claude-sonnet-4-6-thinking',
       messages: [
@@ -379,6 +414,7 @@ describe('translateRequest — extended thinking', () => {
           role: 'assistant',
           content: 'Calling tool now.',
           reasoning_content: 'Need to look this up.',
+          reasoning_signature: 'sig-tool-turn',
           tool_calls: [
             {
               id: 'tu_a',
@@ -389,10 +425,39 @@ describe('translateRequest — extended thinking', () => {
         },
       ],
     });
-    const blocks = out.messages[0]!.content as Array<{ type: string }>;
+    const blocks = out.messages[0]!.content as Array<{
+      type: string;
+      signature?: string;
+    }>;
     expect(blocks[0]!.type).toBe('thinking');
+    expect(blocks[0]!.signature).toBe('sig-tool-turn');
     expect(blocks[1]!.type).toBe('text');
     expect(blocks[2]!.type).toBe('tool_use');
+  });
+
+  it('drops the thinking block on a tool-call assistant turn with no signature', () => {
+    // Same legacy graceful-degrade as above, but for the tool-call branch.
+    const out = translateRequest({
+      model: 'pa/claude-sonnet-4-6-thinking',
+      messages: [
+        {
+          role: 'assistant',
+          content: 'Calling tool.',
+          reasoning_content: 'Need lookup.',
+          tool_calls: [
+            {
+              id: 'tu_b',
+              type: 'function',
+              function: { name: 'lookup', arguments: '{}' },
+            },
+          ],
+        },
+      ],
+    });
+    const blocks = out.messages[0]!.content as Array<{ type: string }>;
+    expect(blocks.find((b) => b.type === 'thinking')).toBeUndefined();
+    expect(blocks[0]!.type).toBe('text');
+    expect(blocks[1]!.type).toBe('tool_use');
   });
 });
 
@@ -433,6 +498,77 @@ describe('translateResponse — extended thinking', () => {
       usage: { input_tokens: 3, output_tokens: 2 },
     });
     expect(out.choices[0]!.message.reasoning_content).toBeUndefined();
+  });
+
+  it('extracts the signature off thinking blocks into reasoning_signature', () => {
+    // v0.1.52 — without this, the second send into a thinking conversation
+    // 400s on the missing signature.
+    const out = translateResponse({
+      id: 'msg_s',
+      type: 'message',
+      role: 'assistant',
+      model: 'x',
+      content: [
+        {
+          type: 'thinking',
+          thinking: 'reasoning trace',
+          signature: 'sig-abc-123',
+        },
+        { type: 'text', text: 'final' },
+      ],
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+      usage: { input_tokens: 2, output_tokens: 5 },
+    });
+    expect(out.choices[0]!.message.reasoning_signature).toBe('sig-abc-123');
+  });
+
+  it('roundtrips signature: response → request preserves the thinking block intact', () => {
+    // End-to-end check that the v0.1.52 fix actually closes the loop. If the
+    // client persists what translateResponse hands back and feeds it into
+    // the next translateRequest, the resulting Anthropic message should
+    // carry the signature unchanged.
+    const apiResp = translateResponse({
+      id: 'msg_rt',
+      type: 'message',
+      role: 'assistant',
+      model: 'pa/claude-sonnet-4-6',
+      content: [
+        {
+          type: 'thinking',
+          thinking: 'first-turn reasoning',
+          signature: 'first-turn-sig',
+        },
+        { type: 'text', text: 'first-turn answer' },
+      ],
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+      usage: { input_tokens: 10, output_tokens: 8 },
+    });
+    const persistedAssistant = apiResp.choices[0]!.message;
+    const nextReq = translateRequest({
+      model: 'pa/claude-sonnet-4-6-thinking',
+      messages: [
+        { role: 'user', content: 'turn 1' },
+        {
+          role: 'assistant',
+          content: persistedAssistant.content,
+          reasoning_content: persistedAssistant.reasoning_content,
+          reasoning_signature: persistedAssistant.reasoning_signature,
+        },
+        { role: 'user', content: 'turn 2 (the one that used to 400)' },
+      ],
+    });
+    const asst = nextReq.messages[1]!;
+    const blocks = asst.content as Array<{
+      type: string;
+      thinking?: string;
+      signature?: string;
+    }>;
+    const thinkingBlock = blocks.find((b) => b.type === 'thinking');
+    expect(thinkingBlock).toBeDefined();
+    expect(thinkingBlock!.thinking).toBe('first-turn reasoning');
+    expect(thinkingBlock!.signature).toBe('first-turn-sig');
   });
 });
 
@@ -492,7 +628,11 @@ describe('translateStream — extended thinking', () => {
     expect(out.endsWith('data: [DONE]\n\n')).toBe(true);
   });
 
-  it('ignores signature_delta events (signature not user-visible)', async () => {
+  it('surfaces signature_delta as a reasoning_signature delta chunk', async () => {
+    // v0.1.52 fix: pre-v0.1.52 we silently dropped signature_delta and
+    // a second send into the same conversation 400'd. Now the signature
+    // flows through as a delta the client can persist on the assistant
+    // message and echo back on the next turn.
     const out = await streamThrough([
       {
         type: 'message_start',
@@ -523,8 +663,7 @@ describe('translateStream — extended thinking', () => {
     ]);
 
     expect(out).toContain('"reasoning_content":"thinking"');
-    expect(out).not.toContain('signature');
-    expect(out).not.toContain('opaque-signature');
+    expect(out).toContain('"reasoning_signature":"opaque-signature"');
   });
 });
 
