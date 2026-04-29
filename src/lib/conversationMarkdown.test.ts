@@ -309,12 +309,12 @@ describe('buildConversationMarkdown', () => {
     const md = buildConversationMarkdown(
       conv({
         messages: [
-          msg({ role: 'assistant', content: 'a', modelId: 'glm-4-plus' }),
+          msg({ role: 'assistant', content: 'a', modelId: 'deepseek-v4-pro' }),
         ],
       }),
       { now: FIXED_NOW }
     );
-    expect(md).toContain('模型: glm-4-plus');
+    expect(md).toContain('模型: deepseek-v4-pro');
   });
 
   it('preserves message order', () => {

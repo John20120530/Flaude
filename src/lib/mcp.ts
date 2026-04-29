@@ -26,6 +26,36 @@
 import { registerTool, unregisterBySource } from './tools';
 import { isTauri, tauriInvoke } from './tauri';
 
+/**
+ * Coerce arbitrary thrown values into a human-readable string. The MCP wire
+ * surface throws via three different mechanisms which we have to tolerate:
+ *   1. Native `Error` instances (most TS code) — read `.message`.
+ *   2. Bare strings (Tauri 2's `invoke` rejects with the raw `Err(String)`
+ *      payload, NOT an Error wrapper). Before v0.1.51 we read `(e as Error)
+ *      .message` on these and silently got `undefined`, which the UI then
+ *      printed as an empty error box — the exact "无具体错误信息" the user
+ *      saw repeatedly when an `npx` MCP failed to start.
+ *   3. Anything else — plain objects, numbers, null. JSON-stringify so we at
+ *      least get a debuggable trace instead of `[object Object]`.
+ *
+ * Exported so the store and any future MCP-touching code path can format
+ * Tauri errors without having to know about the string-vs-Error split.
+ */
+export function mcpErrorMessage(e: unknown): string {
+  if (typeof e === 'string') return e;
+  if (e instanceof Error) return e.message;
+  if (e && typeof e === 'object') {
+    const msg = (e as { message?: unknown }).message;
+    if (typeof msg === 'string' && msg.length > 0) return msg;
+    try {
+      return JSON.stringify(e);
+    } catch {
+      return String(e);
+    }
+  }
+  return String(e);
+}
+
 interface MCPToolInfo {
   name: string;
   description?: string;
@@ -287,7 +317,7 @@ export class StdioTransport implements MCPTransport {
         // IPC failure usually means the host shut down or the session is
         // gone. Reject everything pending and stop.
         this.failAllPending(
-          new Error(`MCP stdio recv 失败: ${(e as Error).message}`),
+          new Error(`MCP stdio recv 失败: ${mcpErrorMessage(e)}`),
         );
         this.recvLoopRunning = false;
         return;
@@ -300,9 +330,24 @@ export class StdioTransport implements MCPTransport {
       }
 
       if (!result.running) {
+        // Child died. The most actionable diagnostic is whatever stderr the
+        // child emitted before exiting — that's where "missing arg",
+        // "command not found inside the wrapper", "FILESYSTEM_ROOT not set",
+        // etc. typically land. Ship it inline so the UI's red box doesn't
+        // just say "exited code=1" with no clue.
+        const stderrTail = (this.stderrLog || result.stderr || '')
+          .trim()
+          .split(/\r?\n/)
+          .slice(-6)
+          .join('\n');
+        const detail = stderrTail
+          ? `\nstderr 末尾:\n${stderrTail}`
+          : '';
         this.failAllPending(
           new Error(
-            `MCP stdio 进程已退出 (code=${result.code ?? '?'}${result.killed ? ', killed' : ''})`,
+            `MCP stdio 进程已退出 (code=${result.code ?? '?'}${
+              result.killed ? ', killed' : ''
+            })${detail}`,
           ),
         );
         this.recvLoopRunning = false;
@@ -385,7 +430,9 @@ export class StdioTransport implements MCPTransport {
       await this.io.send(message);
     } catch (e) {
       this.pending.delete(id);
-      throw new Error(`MCP stdio send 失败: ${(e as Error).message}`);
+      throw new Error(`MCP stdio send 失败: ${mcpErrorMessage(e)}`, {
+        cause: e,
+      });
     }
 
     return promise;

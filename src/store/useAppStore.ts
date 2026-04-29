@@ -30,6 +30,7 @@ import {
   forgetStdioSession,
   getStdioSession,
   killStdioMCP,
+  mcpErrorMessage,
   rememberStdioSession,
   spawnStdioMCP,
 } from '@/lib/mcp';
@@ -1233,7 +1234,12 @@ export const useAppStore = create<AppState>()(
                 ? {
                     ...m,
                     status: 'error',
-                    lastError: (e as Error).message,
+                    // mcpErrorMessage handles all 3 error shapes (Error,
+                    // bare-string from Tauri invoke rejection, or arbitrary
+                    // object). Before v0.1.51 this read .message on a string
+                    // and got `undefined`, which the UI then printed as "无
+                    // 具体错误信息" — the empty box the user kept seeing.
+                    lastError: mcpErrorMessage(e),
                   }
                 : m
             ),

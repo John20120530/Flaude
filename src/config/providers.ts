@@ -125,32 +125,10 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = [
       },
     ],
   },
-  {
-    id: 'zhipu',
-    displayName: '智谱 GLM',
-    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
-    enabled: true,
-    models: [
-      {
-        id: 'glm-4-plus',
-        providerId: 'zhipu',
-        displayName: 'GLM-4 Plus',
-        description: '旗舰模型，工具调用稳定',
-        contextWindow: 128_000,
-        capabilities: { tools: true, vision: true },
-        recommendedFor: ['chat', 'code'],
-      },
-      {
-        id: 'glm-4-air',
-        providerId: 'zhipu',
-        displayName: 'GLM-4 Air',
-        description: '轻量快速',
-        contextWindow: 128_000,
-        capabilities: { tools: true },
-        recommendedFor: ['chat'],
-      },
-    ],
-  },
+  // 智谱 GLM 已下架（v0.1.51）。BigModel 的 OpenAI-compat 端点对工具调用经常
+  // 给出不规范的 finish_reason，叠加 GLM-4-Plus 在中文长文上又比 DeepSeek V4 Pro
+  // 弱，留着只会让默认池子更复杂；用户也可以在 Settings 里手动加回 custom
+  // provider 如果真的想用。
   {
     id: 'moonshot',
     displayName: 'Kimi 月之暗面',
@@ -360,10 +338,10 @@ export const DEFAULT_DESIGN_IMAGE_GEN_MODEL = 'gpt-image-2';
  * the user expects to be picked up. Users who want speed-over-quality
  * can manually pick `qwen3-vl-flash` from the model picker.
  *
- * **Why not GLM-4 / Zhipu**: GLM-4-Plus does support vision but pricing
- * is higher and the OpenAI-compat surface needs more parameter shimming;
- * Qwen3-VL-Plus is cheaper for the typical small-resolution screenshot
- * input.
+ * **Why not Claude vision here as default**: Sonnet 4.6 vision is excellent
+ * but PPIO charges $3/M input — vs. Qwen3-VL-Plus at ~$0.86/M input. For the
+ * "redesign this screenshot" use case the quality bump doesn't justify ~3.5×
+ * cost; users who want it can pick it explicitly in the Design TopBar.
  */
 export const DESIGN_VISION_FALLBACK_MODEL = 'qwen3-vl-plus';
 

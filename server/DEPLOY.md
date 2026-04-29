@@ -143,9 +143,6 @@ pnpm wrangler secret put DEEPSEEK_API_KEY
 # Qwen (Alibaba DashScope, OpenAI-compatible) — https://dashscope.console.aliyun.com
 pnpm wrangler secret put QWEN_API_KEY
 
-# Zhipu GLM (BigModel) — https://bigmodel.cn
-pnpm wrangler secret put ZHIPU_API_KEY
-
 # Moonshot Kimi — https://platform.moonshot.cn
 pnpm wrangler secret put MOONSHOT_API_KEY
 ```

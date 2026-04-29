@@ -248,8 +248,7 @@ function DefaultModelsSection() {
     .filter((p) => p.models.length > 0);
 
   // Vision-capable language models. Filtering by `capabilities.vision`
-  // surfaces Qwen3-VL-* + GLM-4-Plus today, and Claude family in v0.1.49
-  // once the provider lands.
+  // surfaces Qwen3-VL-* and the Claude family (PPIO Sonnet/Haiku/Opus 4.x).
   const visionProviders = enabledProviders
     .map((p) => ({
       ...p,
