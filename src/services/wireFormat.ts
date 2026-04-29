@@ -32,6 +32,15 @@ export type WireMessage = {
    * previous turn produced reasoning content; ignored by other providers.
    */
   reasoning_content?: string;
+  /**
+   * Anthropic Extended Thinking signature (v0.1.52). Required alongside
+   * `reasoning_content` on the prior assistant turn when continuing a
+   * Claude thinking-mode conversation — the Worker's anthropicAdapter
+   * re-attaches it to the reconstructed thinking block. Without it the
+   * upstream 400s on `messages[i].content[j].thinking.signature: Field
+   * required`. Other providers (DeepSeek, Qwen) ignore it.
+   */
+  reasoning_signature?: string;
 };
 
 export function serializeMessages(messages: Message[], system?: string): WireMessage[] {
@@ -122,6 +131,7 @@ export function serializeMessages(messages: Message[], system?: string): WireMes
         if (!text) continue;
         const msg: WireMessage = { role: 'assistant', content: text };
         if (m.reasoning) msg.reasoning_content = m.reasoning;
+        if (m.reasoningSignature) msg.reasoning_signature = m.reasoningSignature;
         out.push(msg);
         continue;
       }
@@ -141,6 +151,7 @@ export function serializeMessages(messages: Message[], system?: string): WireMes
         })),
       };
       if (m.reasoning) msg.reasoning_content = m.reasoning;
+      if (m.reasoningSignature) msg.reasoning_signature = m.reasoningSignature;
       out.push(msg);
       continue;
     }
@@ -174,6 +185,8 @@ function serializeContentMessage(m: Message): WireMessage {
   if (images.length === 0) {
     const msg: WireMessage = { role: m.role, content: bodyText };
     if (m.role === 'assistant' && m.reasoning) msg.reasoning_content = m.reasoning;
+    if (m.role === 'assistant' && m.reasoningSignature)
+      msg.reasoning_signature = m.reasoningSignature;
     return msg;
   }
 
@@ -183,6 +196,8 @@ function serializeContentMessage(m: Message): WireMessage {
   }
   const msg: WireMessage = { role: m.role, content: parts };
   if (m.role === 'assistant' && m.reasoning) msg.reasoning_content = m.reasoning;
+  if (m.role === 'assistant' && m.reasoningSignature)
+    msg.reasoning_signature = m.reasoningSignature;
   return msg;
 }
 

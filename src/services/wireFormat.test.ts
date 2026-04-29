@@ -51,6 +51,37 @@ describe('serializeMessages — basics', () => {
     ]);
     expect(out[0]).not.toHaveProperty('reasoning_content');
   });
+
+  it('echoes reasoning_signature on assistant messages (Anthropic Extended Thinking requirement, v0.1.52)', () => {
+    // The exact bug v0.1.52 fixes: without reasoning_signature on the
+    // wire, the next Claude thinking-mode turn 400s on
+    // `messages[i].content[j].thinking.signature: Field required`.
+    const out = serializeMessages([
+      userMsg({
+        role: 'assistant',
+        content: 'final',
+        reasoning: 'thinking trace',
+        reasoningSignature: 'opaque-sig-blob',
+      }),
+    ]);
+    expect(out[0]).toMatchObject({
+      role: 'assistant',
+      content: 'final',
+      reasoning_content: 'thinking trace',
+      reasoning_signature: 'opaque-sig-blob',
+    });
+  });
+
+  it('omits reasoning_signature when the assistant message has no signature', () => {
+    const out = serializeMessages([
+      userMsg({
+        role: 'assistant',
+        content: 'final',
+        reasoning: 'thinking only',
+      }),
+    ]);
+    expect(out[0]).not.toHaveProperty('reasoning_signature');
+  });
 });
 
 describe('serializeMessages — tool calls', () => {

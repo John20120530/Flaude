@@ -1607,12 +1607,19 @@ export const useAppStore = create<AppState>()(
               const meta = (m.metadata ?? {}) as {
                 attachments?: Attachment[];
                 toolCalls?: ToolCall[];
+                // v0.1.52 — Anthropic thinking signature, see toWireMessage
+                // in lib/sync.ts. Older messages from before v0.1.52 won't
+                // have it; that's fine, anthropicAdapter.translateRequest
+                // gracefully drops the thinking block reconstruction when
+                // signature is missing.
+                reasoningSignature?: string;
               };
               return {
                 id: m.id,
                 role: (m.role as Message['role']) ?? 'user',
                 content: m.content,
                 reasoning: m.reasoning ?? undefined,
+                reasoningSignature: meta.reasoningSignature,
                 attachments: meta.attachments,
                 toolCalls: meta.toolCalls,
                 modelId: m.modelId ?? undefined,

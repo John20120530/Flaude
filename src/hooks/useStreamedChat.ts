@@ -250,6 +250,13 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
 
       let accumulated = '';
       let reasoning = '';
+      // Anthropic Extended Thinking signature (v0.1.52). One concat'd string
+      // per assistant turn — Anthropic emits it once at the end of the
+      // thinking content block, but we accumulate just in case the upstream
+      // ever splits it. Persisted on the assistant message so the next turn
+      // can echo it back; without it Claude 400s on
+      // `messages[i].content[j].thinking.signature: Field required`.
+      let reasoningSignature = '';
       const toolCallsMap = new Map<string, ToolCall>();
       let finishReason: string | undefined;
 
@@ -343,6 +350,18 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
           reasoning += chunk.reasoningDelta;
           scheduleReasoning();
         }
+        if (chunk.reasoningSignatureDelta) {
+          reasoningSignature += chunk.reasoningSignatureDelta;
+          // Patch immediately rather than throttling — signature is at most
+          // a few hundred bytes, arrives at the end of each thinking block
+          // (usually as a single chunk), and getting it persisted before
+          // the next user send is what closes the v0.1.52 bug. Throttling
+          // would risk losing it if the user fires the next prompt within
+          // the 150ms window.
+          patchLastMessage(conversation.id, {
+            reasoningSignature,
+          });
+        }
         if (chunk.toolCallDelta) {
           const tc = chunk.toolCallDelta;
           if (tc.id) {
@@ -427,6 +446,15 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
         role: 'assistant',
         content: accumulated, // raw; serializeMessages will still ship it
         reasoning: reasoning || undefined,
+        // Carry the signature into the next turn's history slice for the
+        // exact same reason `reasoning` is carried: serializeMessages reads
+        // it off the message and ships it to the wire as
+        // `reasoning_signature`, which the Worker's anthropicAdapter
+        // re-attaches to the reconstructed thinking block. Without this
+        // line the second tool-roundtrip turn into a thinking conversation
+        // 400s. (DeepSeek-style providers ignore the field — it only
+        // matters for `pa/claude-*-thinking` models.)
+        reasoningSignature: reasoningSignature || undefined,
         toolCalls,
         createdAt: Date.now(),
         modelId: effectiveModelId,
@@ -919,6 +947,11 @@ export function useStreamedChat({ conversation, systemPrompt }: Options) {
     patchLastMessage(current.id, {
       content: '',
       reasoning: undefined,
+      // Wipe the old signature too — regenerate re-streams from scratch and
+      // the new run produces a fresh signature. Leaving the stale one would
+      // be wrong on the next turn (it'd reference a thinking trace that no
+      // longer exists in the conversation history).
+      reasoningSignature: undefined,
       tokensIn: undefined,
       tokensOut: undefined,
       toolCalls: undefined,

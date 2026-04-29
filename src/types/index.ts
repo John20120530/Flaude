@@ -44,6 +44,15 @@ export interface Message {
   attachments?: Attachment[];
   toolCalls?: ToolCall[];
   reasoning?: string;            // For thinking models
+  /**
+   * Anthropic Extended Thinking proof-of-thinking signature (opaque base64).
+   * Echoed back on the next request inside the same thinking block, otherwise
+   * Anthropic 400s on `messages[i].content[j].thinking.signature: Field
+   * required`. v0.1.52 added this to fix the 2nd-turn 400 the user hit on
+   * Code mode with Opus thinking. DeepSeek thinking-mode doesn't use this
+   * field — only Anthropic does — so it stays undefined for non-Claude turns.
+   */
+  reasoningSignature?: string;
   createdAt: number;
   modelId?: string;              // Which model produced this message
   tokensIn?: number;
@@ -178,6 +187,13 @@ export interface ProviderConfig {
 export interface StreamChunk {
   delta?: string;                // Content delta
   reasoningDelta?: string;       // Thinking delta
+  /**
+   * Anthropic Extended Thinking signature delta. The upstream emits one
+   * `signature_delta` per thinking content block (usually a single chunk
+   * at the block end). The streaming consumer concatenates these into a
+   * single `reasoningSignature` on the assistant message.
+   */
+  reasoningSignatureDelta?: string;
   toolCallDelta?: Partial<ToolCall>;
   finish?: 'stop' | 'length' | 'tool_calls' | 'error';
   error?: string;

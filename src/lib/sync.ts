@@ -143,6 +143,12 @@ export function toWireMessage(m: Message): SyncMessage {
   if (m.toolCalls && m.toolCalls.length > 0) {
     metadata.toolCalls = m.toolCalls;
   }
+  // v0.1.52 — Anthropic Extended Thinking signature. Server schema doesn't
+  // have a column for it, so it rides in metadata alongside attachments /
+  // toolCalls. The pull path below mirrors this and reads it back out.
+  if (m.reasoningSignature) {
+    metadata.reasoningSignature = m.reasoningSignature;
+  }
   return {
     id: m.id,
     role: m.role,

@@ -63,6 +63,24 @@ export interface OpenAIMessage {
   tool_call_id?: string;
   tool_calls?: OpenAIToolCall[];
   reasoning_content?: string;
+  /**
+   * Anthropic Extended Thinking proof-of-thinking signature, opaque base64.
+   * The upstream emits this in `signature_delta` events at the end of each
+   * thinking block; v0.1.51 dropped it on the floor, but Anthropic enforces
+   * its presence on the *next* turn — the broken request the user reported
+   * was `messages.1.content.0.thinking.signature: Field required` after a
+   * second send into a thinking-mode conversation. v0.1.52 roundtrips it:
+   * translateStream surfaces it on the assistant message, the client
+   * persists it (`Message.reasoningSignature`), and translateRequest
+   * re-attaches it when reconstructing the leading thinking block on
+   * subsequent turns.
+   *
+   * Old conversations that pre-date the fix won't have this field — when
+   * it's missing we drop the thinking block reconstruction entirely so the
+   * request still goes through. Reasoning continuity is lost (the model
+   * re-derives) but the user gets a response instead of a 400.
+   */
+  reasoning_signature?: string;
 }
 
 export type OpenAIContentPart =
@@ -255,8 +273,25 @@ export function translateRequest(req: OpenAIRequest): AnthropicRequest {
       // reasoning and the model re-derives from scratch (or, worse,
       // contradicts its own earlier work). See translateResponse for
       // the matching extraction direction.
-      if (m.reasoning_content && m.reasoning_content.length > 0) {
-        blocks.push({ type: 'thinking', thinking: m.reasoning_content });
+      //
+      // v0.1.52: only reconstruct the thinking block when we ALSO have its
+      // `signature` — Anthropic enforces signature presence on every
+      // thinking block in subsequent requests. Without it the call 400s
+      // with `messages[i].content[j].thinking.signature: Field required`.
+      // Old conversations from before the fix won't have a signature
+      // (v0.1.51 silently dropped the signature_delta stream events) so
+      // we drop the thinking block entirely there — reasoning continuity
+      // is lost on the legacy turn but at least the next turn succeeds.
+      if (
+        m.reasoning_content &&
+        m.reasoning_content.length > 0 &&
+        m.reasoning_signature
+      ) {
+        blocks.push({
+          type: 'thinking',
+          thinking: m.reasoning_content,
+          signature: m.reasoning_signature,
+        });
       }
       const text = stringifyContent(m.content);
       if (text) blocks.push({ type: 'text', text });
@@ -287,13 +322,21 @@ export function translateRequest(req: OpenAIRequest): AnthropicRequest {
     // reasoning_content (DeepSeek thinking-mode echo). Reconstruct
     // a thinking content block at the head so Anthropic preserves
     // the reasoning chain across turns.
+    //
+    // v0.1.52: same signature-required gate as the tool-call branch above.
+    // Without `reasoning_signature` Anthropic 400s on the next turn.
     if (
       m.role === 'assistant' &&
       m.reasoning_content &&
-      m.reasoning_content.length > 0
+      m.reasoning_content.length > 0 &&
+      m.reasoning_signature
     ) {
       const blocks: AnthropicContentBlock[] = [
-        { type: 'thinking', thinking: m.reasoning_content },
+        {
+          type: 'thinking',
+          thinking: m.reasoning_content,
+          signature: m.reasoning_signature,
+        },
       ];
       const text = stringifyContent(m.content);
       if (text) blocks.push({ type: 'text', text });
@@ -444,6 +487,10 @@ export interface OpenAIResponse {
       content: string;
       tool_calls?: OpenAIToolCall[];
       reasoning_content?: string;
+      // Anthropic Extended Thinking signature (opaque proof-of-thinking).
+      // Surfaced on the response so the client can persist it and
+      // translateRequest can re-attach it on the next turn.
+      reasoning_signature?: string;
     };
     finish_reason: 'stop' | 'length' | 'tool_calls' | 'content_filter' | null;
   }>;
@@ -460,12 +507,18 @@ export function translateResponse(resp: AnthropicResponse): OpenAIResponse {
   // field the client already knows how to render in the 推理 panel).
   const textParts: string[] = [];
   const thinkingParts: string[] = [];
+  // v0.1.52: collect signature alongside thinking content so the client
+  // can persist it for the next turn. Anthropic emits one signature per
+  // thinking block; on the rare chance of multiple thinking blocks we
+  // only keep the last (it carries the proof for the full chain).
+  let lastSignature: string | undefined;
   const toolCalls: OpenAIToolCall[] = [];
   for (const block of resp.content) {
     if (block.type === 'text') {
       textParts.push(block.text);
     } else if (block.type === 'thinking') {
       thinkingParts.push(block.thinking);
+      if (block.signature) lastSignature = block.signature;
     } else if (block.type === 'tool_use') {
       toolCalls.push({
         id: block.id,
@@ -494,6 +547,7 @@ export function translateResponse(resp: AnthropicResponse): OpenAIResponse {
           ...(thinkingParts.length > 0
             ? { reasoning_content: thinkingParts.join('') }
             : {}),
+          ...(lastSignature ? { reasoning_signature: lastSignature } : {}),
           ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
         },
         finish_reason: mapStopReason(resp.stop_reason),
@@ -735,6 +789,21 @@ export function translateStream(modelHint: string): TransformStream<Uint8Array, 
               },
             ],
           });
+        } else if (
+          state.kind === 'thinking' &&
+          evt.delta.type === 'signature_delta'
+        ) {
+          // v0.1.52: surface the thinking block's proof-of-thinking so the
+          // client persists it on the assistant message. Without it, a
+          // second send into the same conversation 400s with
+          // `messages[i].content[j].thinking.signature: Field required`.
+          // We pass the signature through verbatim — it's an opaque base64
+          // string the client doesn't parse, just stores and echoes back.
+          // Anthropic emits it as one delta per thinking block (often as a
+          // single chunk at the block end). The client concatenates if
+          // multiple deltas arrive.
+          ensureHeader();
+          out += deltaChunk({ reasoning_signature: evt.delta.signature });
         }
         return out;
       }
