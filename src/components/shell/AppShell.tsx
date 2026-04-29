@@ -14,6 +14,17 @@ export default function AppShell() {
   const artifactsOpen = useAppStore((s) => s.artifactsOpen);
   const artifactsPanelWidth = useAppStore((s) => s.artifactsPanelWidth);
   const setArtifactsPanelWidth = useAppStore((s) => s.setArtifactsPanelWidth);
+  const activeMode = useAppStore((s) => s.activeMode);
+
+  // Design mode owns its own right pane (DesignCanvas) — that IS the
+  // primary artifact viewer for that mode. Stacking the generic Artifacts
+  // panel on top of it gives 4 columns (sidebar | chat | canvas | artifacts)
+  // which crams every column onto a 1280px window, and the generic image
+  // thumbnails the panel surfaces (from `image_generate` calls) duplicate
+  // what's already embedded in the canvas's HTML. So we suppress the panel
+  // entirely in Design mode — the user can flip to Chat/Code if they
+  // really want to inspect raw artifacts.
+  const showArtifacts = artifactsOpen && activeMode !== 'design';
 
   // Inline all drag state into the closure so the listener doesn't need to
   // reference itself (which confuses React Compiler's "access before
@@ -64,7 +75,7 @@ export default function AppShell() {
           <div className="flex-1 min-w-0 flex flex-col">
             <Outlet />
           </div>
-          {artifactsOpen && (
+          {showArtifacts && (
             <>
               {/*
                 Thin vertical gutter that the user can grab to resize the
