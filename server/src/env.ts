@@ -4,19 +4,22 @@
  * Kept in its own file so routes and middleware can import without creating
  * circular deps with index.ts.
  */
-import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
+import type { D1Database, KVNamespace } from '@cloudflare/workers-types';
 
 export interface Env {
   // D1 binding from wrangler.toml.
   DB: D1Database;
 
-  // R2 binding from wrangler.toml. Mirror target for image_generate
+  // KV binding from wrangler.toml. Mirror target for image_generate
   // (server/src/imageProxy.ts) — turns 24h-expiring upstream signed URLs
-  // into permanent /api/image/<sha256>.png URLs. Optional at the type
-  // level so production worker keeps responding even if the bucket binding
-  // is forgotten — image_generate gracefully falls back to passing the
-  // upstream URL through unchanged when IMAGES is undefined.
-  IMAGES?: R2Bucket;
+  // into permanent /api/image/<sha256>.png URLs. KV instead of R2 because
+  // R2 requires a credit card on file even on free tier; KV is included
+  // in Workers Free with 1 GB storage / 1k writes-day / 100k reads-day,
+  // plenty for a 5-10 user team. Optional at the type level so the worker
+  // keeps responding even if the binding is forgotten — image_generate
+  // gracefully falls back to passing the upstream URL through unchanged
+  // when IMAGES is undefined.
+  IMAGES?: KVNamespace;
 
   // Public config (vars in wrangler.toml).
   APP_ENV: 'development' | 'production';
