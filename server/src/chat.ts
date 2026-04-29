@@ -187,13 +187,26 @@ chat.post('/v1/chat/completions', async (c) => {
   }
 
   // ---- call upstream --------------------------------------------------
-  // 60s ceiling on the upstream fetch. DeepSeek's p99 is well under this;
-  // we mostly want to guarantee we don't hang the request forever if the
-  // runtime's network stack stalls on connection setup (seen intermittently
-  // on wrangler 3.x / Windows). For streaming, this timeout only covers the
-  // initial handshake; once the stream starts, the Workers runtime's own
-  // 30s-per-event budget takes over.
-  const ABORT_MS = 60_000;
+  // Provider-aware fetch timeout. The number is a ceiling on how long we'll
+  // wait for the upstream to send response *headers*; once headers arrive
+  // and we hand back the stream, the Workers runtime takes over (it has
+  // its own 100s subrequest cap that bounds total wall time).
+  //
+  //   - DeepSeek / Qwen / Moonshot (OpenAI-compat): 60s. Their p99 ttfb is
+  //     under 5s, so 60s is just there to catch network stalls (seen
+  //     intermittently on wrangler 3.x / Windows).
+  //   - PPIO Anthropic (Claude Sonnet/Opus + extended thinking): 180s.
+  //     v0.1.55 raised this from 60s after a user hit "upstream timed out"
+  //     in Design mode with Opus 4.6 + thinking. Live measurement showed
+  //     ttfb=21s and total=96s for that exact prompt — comfortably inside
+  //     180s but flagrantly over 60s on bad runs. Anthropic's extended
+  //     thinking buffers the entire `thinking` block before emitting the
+  //     first SSE event, and on Opus + a 5KB system prompt that buffer
+  //     can take a full minute. The Workers subrequest cap (~100s) still
+  //     limits the absolute worst case below this number, so 180s is
+  //     "as much slack as the runtime will give us"; effective ceiling
+  //     is whichever is smaller.
+  const ABORT_MS = resolved.provider.id === 'ppio' ? 180_000 : 60_000;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ABORT_MS);
 
