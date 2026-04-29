@@ -155,6 +155,16 @@ export async function* streamChat(req: ChatRequest): AsyncGenerator<StreamChunk>
   const decoder = new TextDecoder();
   let buffer = '';
   const toolCallBuf: Record<number, ToolCall> = {};
+  // v0.1.58: track whether we've yielded ANY data so we can detect "empty
+  // stream" — happens when the upstream/Worker closes the connection
+  // cleanly without sending `data: [DONE]\n\n` AND without sending any
+  // body chunks. Pre-v0.1.58 this fell out of the loop with no `finish`
+  // chunk, the streaming hook treated it as a "valid empty completion",
+  // and the assistant bubble just sat empty forever — exactly what the
+  // user reported as "对话停了，发新消息也没反馈". (Subsequent sends did
+  // start fresh streams; what stuck was the user's perception that the
+  // turn before never resolved.)
+  let producedAnything = false;
 
   try {
     while (true) {
@@ -180,10 +190,12 @@ export async function* streamChat(req: ChatRequest): AsyncGenerator<StreamChunk>
           const delta = choice.delta ?? {};
 
           if (typeof delta.content === 'string' && delta.content.length > 0) {
+            producedAnything = true;
             yield { delta: delta.content };
           }
           // Thinking / reasoning content (DeepSeek-R1 style)
           if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
+            producedAnything = true;
             yield { reasoningDelta: delta.reasoning_content };
           }
           // Anthropic Extended Thinking signature (v0.1.52). Surfaced by
@@ -195,6 +207,7 @@ export async function* streamChat(req: ChatRequest): AsyncGenerator<StreamChunk>
             typeof delta.reasoning_signature === 'string' &&
             delta.reasoning_signature.length > 0
           ) {
+            producedAnything = true;
             yield { reasoningSignatureDelta: delta.reasoning_signature };
           }
           // Tool call deltas
@@ -215,6 +228,7 @@ export async function* streamChat(req: ChatRequest): AsyncGenerator<StreamChunk>
                 const prev = (buf.arguments as { __raw?: string }).__raw ?? '';
                 (buf.arguments as { __raw?: string }).__raw = prev + tc.function.arguments;
               }
+              producedAnything = true;
               yield { toolCallDelta: buf };
             }
           }
@@ -254,11 +268,30 @@ export async function* streamChat(req: ChatRequest): AsyncGenerator<StreamChunk>
     } else {
       yield { finish: 'error', error: (err as Error).message };
     }
+    return;
   } finally {
     try {
       reader.releaseLock();
     } catch {
       // noop
     }
+  }
+
+  // v0.1.58: stream ended cleanly (reader done) WITHOUT seeing
+  // `data: [DONE]\n\n` and without throwing. The early-return on `[DONE]`
+  // covers the happy path; reaching here means upstream (Worker / PPIO /
+  // DeepSeek) closed the connection mid-flight without the terminator.
+  // Emit something so the streaming hook doesn't sit on an empty bubble:
+  //   - if we got nothing at all, that's an error the user must see
+  //   - if we got partial content, treat as a 'stop' so the partial
+  //     output is preserved and the agent can continue (tool round-trips
+  //     finalize on `finishReason !== 'tool_calls'`, which 'stop' satisfies)
+  if (!producedAnything) {
+    yield {
+      finish: 'error',
+      error: '上游流提前结束（没有 [DONE]，也没有任何输出）。可能是网络瞬断或上游崩了，重试一次试试。',
+    };
+  } else {
+    yield { finish: 'stop' };
   }
 }
