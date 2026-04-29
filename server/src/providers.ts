@@ -201,9 +201,19 @@ const PPIO: ProviderConfig = {
   baseUrl: 'https://api.ppio.com/anthropic',
   keyEnvName: 'PPIO_API_KEY',
   models: {
-    'pa/claude-sonnet-4-6':         { inputMicroUsdPer1k:  3000, outputMicroUsdPer1k: 15000 },
-    'pa/claude-haiku-4-5-20251001': { inputMicroUsdPer1k:  1000, outputMicroUsdPer1k:  5000 },
-    'pa/claude-opus-4-6':           { inputMicroUsdPer1k: 15000, outputMicroUsdPer1k: 75000 },
+    'pa/claude-sonnet-4-6':                  { inputMicroUsdPer1k:  3000, outputMicroUsdPer1k: 15000 },
+    'pa/claude-haiku-4-5-20251001':          { inputMicroUsdPer1k:  1000, outputMicroUsdPer1k:  5000 },
+    'pa/claude-opus-4-6':                    { inputMicroUsdPer1k: 15000, outputMicroUsdPer1k: 75000 },
+    // v0.1.50: extended-thinking variants. The `-thinking` suffix is
+    // stripped server-side by anthropicAdapter.translateRequest before
+    // forwarding (the upstream model name stays valid). Same per-token
+    // pricing as the non-thinking variant — Anthropic doesn't charge
+    // extra for thinking tokens beyond the regular output rate, and the
+    // budget caps how many thinking tokens can be billed.
+    // Haiku is intentionally excluded — Anthropic Haiku 4.5 doesn't
+    // support extended thinking; only Sonnet + Opus do.
+    'pa/claude-sonnet-4-6-thinking':         { inputMicroUsdPer1k:  3000, outputMicroUsdPer1k: 15000 },
+    'pa/claude-opus-4-6-thinking':           { inputMicroUsdPer1k: 15000, outputMicroUsdPer1k: 75000 },
   },
 };
 

@@ -105,6 +105,17 @@ export interface AnthropicRequest {
   stop_sequences?: string[];
   tools?: AnthropicToolDef[];
   tool_choice?: AnthropicToolChoice;
+  /**
+   * Anthropic Extended Thinking. When set with `type: 'enabled'`, the
+   * model emits `thinking` content blocks (signed CoT) before the final
+   * response. v0.1.50: enabled by translateRequest when the client
+   * sends a model id ending in `-thinking` (the suffix is stripped
+   * before forwarding so the upstream model name stays valid). The
+   * budget_tokens cap how much thinking the model can do before it
+   * MUST emit user-visible content. 16k is comfortable for hard
+   * reasoning without runaway cost.
+   */
+  thinking?: { type: 'enabled' | 'disabled'; budget_tokens?: number };
 }
 
 export interface AnthropicMessage {
@@ -126,7 +137,15 @@ export type AnthropicContentBlock =
       tool_use_id: string;
       content: string | AnthropicContentBlock[];
       is_error?: boolean;
-    };
+    }
+  /**
+   * Extended Thinking content block. The `signature` field is opaque
+   * proof-of-thinking that the upstream requires us to echo back on
+   * subsequent turns when continuing the conversation — without it the
+   * thinking gets discarded by the model in the next round-trip and
+   * reasoning continuity is lost.
+   */
+  | { type: 'thinking'; thinking: string; signature?: string };
 
 export interface AnthropicToolDef {
   name: string;
@@ -155,6 +174,36 @@ export interface AnthropicResponse {
 // =============================================================================
 
 const DEFAULT_MAX_TOKENS = 8192;
+
+/**
+ * Default thinking budget when the client picked a `-thinking` model.
+ * 16K tokens is comfortable headroom for the kind of multi-step
+ * reasoning users actually invoke thinking mode for (proofs, hard
+ * code-review, multi-file architectural questions). The model will
+ * not consume the whole budget on simple turns — it self-paces and
+ * stops thinking when ready.
+ */
+const DEFAULT_THINKING_BUDGET_TOKENS = 16_000;
+
+const THINKING_SUFFIX = '-thinking';
+
+/**
+ * If the client model id ends in `-thinking`, return the upstream
+ * model name (suffix stripped) plus a flag enabling thinking mode.
+ * Otherwise pass through unchanged.
+ */
+function resolveThinkingModel(modelId: string): {
+  upstreamModel: string;
+  thinkingEnabled: boolean;
+} {
+  if (modelId.endsWith(THINKING_SUFFIX)) {
+    return {
+      upstreamModel: modelId.slice(0, -THINKING_SUFFIX.length),
+      thinkingEnabled: true,
+    };
+  }
+  return { upstreamModel: modelId, thinkingEnabled: false };
+}
 
 export function translateRequest(req: OpenAIRequest): AnthropicRequest {
   // Sweep system messages into a single top-level `system` string. We
@@ -200,6 +249,15 @@ export function translateRequest(req: OpenAIRequest): AnthropicRequest {
       // Assistant turn that called tools. Anthropic embeds tool_use as
       // content blocks alongside any preceding text.
       const blocks: AnthropicContentBlock[] = [];
+      // Thinking comes FIRST in the content array — preserve reasoning
+      // continuity on multi-turn thinking conversations. Without this,
+      // continuing a thinking-mode conversation drops the prior round's
+      // reasoning and the model re-derives from scratch (or, worse,
+      // contradicts its own earlier work). See translateResponse for
+      // the matching extraction direction.
+      if (m.reasoning_content && m.reasoning_content.length > 0) {
+        blocks.push({ type: 'thinking', thinking: m.reasoning_content });
+      }
       const text = stringifyContent(m.content);
       if (text) blocks.push({ type: 'text', text });
       for (const tc of m.tool_calls) {
@@ -225,22 +283,57 @@ export function translateRequest(req: OpenAIRequest): AnthropicRequest {
       continue;
     }
 
-    // Plain user/assistant message.
+    // Plain user/assistant message — but assistant messages may carry
+    // reasoning_content (DeepSeek thinking-mode echo). Reconstruct
+    // a thinking content block at the head so Anthropic preserves
+    // the reasoning chain across turns.
+    if (
+      m.role === 'assistant' &&
+      m.reasoning_content &&
+      m.reasoning_content.length > 0
+    ) {
+      const blocks: AnthropicContentBlock[] = [
+        { type: 'thinking', thinking: m.reasoning_content },
+      ];
+      const text = stringifyContent(m.content);
+      if (text) blocks.push({ type: 'text', text });
+      messages.push({ role: 'assistant', content: blocks });
+      continue;
+    }
+
     messages.push({
       role: m.role === 'system' ? 'user' : (m.role as 'user' | 'assistant'),
       content: translateContent(m.content),
     });
   }
 
+  const { upstreamModel, thinkingEnabled } = resolveThinkingModel(req.model);
+
+  // max_tokens MUST exceed budget_tokens when thinking is on — Anthropic
+  // 400s otherwise. Bump to budget + 4096 if the client's max_tokens is
+  // too low (or unset) for thinking turns.
+  const effectiveMaxTokens = req.max_tokens ?? DEFAULT_MAX_TOKENS;
+  const finalMaxTokens = thinkingEnabled
+    ? Math.max(effectiveMaxTokens, DEFAULT_THINKING_BUDGET_TOKENS + 4096)
+    : effectiveMaxTokens;
+
   const out: AnthropicRequest = {
-    model: req.model,
-    max_tokens: req.max_tokens ?? DEFAULT_MAX_TOKENS,
+    model: upstreamModel,
+    max_tokens: finalMaxTokens,
     messages,
   };
 
   if (systemParts.length > 0) out.system = systemParts.join('\n\n');
-  if (typeof req.temperature === 'number') out.temperature = req.temperature;
-  if (typeof req.top_p === 'number') out.top_p = req.top_p;
+  // Temperature note: Anthropic's extended-thinking spec requires
+  // temperature=1 (the default). Setting any other value alongside
+  // `thinking: enabled` returns 400 with "extended thinking requires
+  // temperature: 1". So we drop the client's temperature when
+  // thinkingEnabled — DeepSeek-style temperature tuning doesn't
+  // apply to Claude's thinking mode anyway.
+  if (typeof req.temperature === 'number' && !thinkingEnabled) {
+    out.temperature = req.temperature;
+  }
+  if (typeof req.top_p === 'number' && !thinkingEnabled) out.top_p = req.top_p;
   if (req.stream) out.stream = true;
   if (req.stop !== undefined) {
     out.stop_sequences = Array.isArray(req.stop) ? req.stop : [req.stop];
@@ -254,6 +347,12 @@ export function translateRequest(req: OpenAIRequest): AnthropicRequest {
   }
   if (req.tool_choice !== undefined) {
     out.tool_choice = translateToolChoice(req.tool_choice);
+  }
+  if (thinkingEnabled) {
+    out.thinking = {
+      type: 'enabled',
+      budget_tokens: DEFAULT_THINKING_BUDGET_TOKENS,
+    };
   }
 
   return out;
@@ -356,12 +455,17 @@ export interface OpenAIResponse {
 }
 
 export function translateResponse(resp: AnthropicResponse): OpenAIResponse {
-  // Concat all text blocks; collect tool_use blocks separately.
+  // Concat all text blocks; collect tool_use blocks separately;
+  // extract thinking blocks into reasoning_content (DeepSeek-style
+  // field the client already knows how to render in the 推理 panel).
   const textParts: string[] = [];
+  const thinkingParts: string[] = [];
   const toolCalls: OpenAIToolCall[] = [];
   for (const block of resp.content) {
     if (block.type === 'text') {
       textParts.push(block.text);
+    } else if (block.type === 'thinking') {
+      thinkingParts.push(block.thinking);
     } else if (block.type === 'tool_use') {
       toolCalls.push({
         id: block.id,
@@ -387,6 +491,9 @@ export function translateResponse(resp: AnthropicResponse): OpenAIResponse {
         message: {
           role: 'assistant',
           content: textParts.join(''),
+          ...(thinkingParts.length > 0
+            ? { reasoning_content: thinkingParts.join('') }
+            : {}),
           ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
         },
         finish_reason: mapStopReason(resp.stop_reason),
@@ -451,6 +558,7 @@ export function translateStream(modelHint: string): TransformStream<Uint8Array, 
   const blocks: Record<
     number,
     | { kind: 'text' }
+    | { kind: 'thinking' }
     | { kind: 'tool_use'; toolIndex: number; toolId: string; toolName: string; argsBuf: string }
   > = {};
   let nextToolIndex = 0;
@@ -572,6 +680,8 @@ export function translateStream(modelHint: string): TransformStream<Uint8Array, 
         const block = evt.content_block;
         if (block.type === 'text') {
           blocks[evt.index] = { kind: 'text' };
+        } else if (block.type === 'thinking') {
+          blocks[evt.index] = { kind: 'thinking' };
         } else if (block.type === 'tool_use') {
           const toolIndex = nextToolIndex++;
           blocks[evt.index] = {
@@ -601,6 +711,17 @@ export function translateStream(modelHint: string): TransformStream<Uint8Array, 
         if (state.kind === 'text' && evt.delta.type === 'text_delta') {
           ensureHeader();
           out += deltaChunk({ content: evt.delta.text });
+        } else if (
+          state.kind === 'thinking' &&
+          evt.delta.type === 'thinking_delta'
+        ) {
+          ensureHeader();
+          // Stream as `reasoning_content` so the existing client
+          // already knows what to do with it (DeepSeek thinking-mode
+          // uses the same field). The 推理 panel populates from
+          // `chunk.reasoningDelta` which providerClient.ts maps from
+          // exactly this delta key.
+          out += deltaChunk({ reasoning_content: evt.delta.thinking });
         } else if (
           state.kind === 'tool_use' &&
           evt.delta.type === 'input_json_delta'
@@ -650,6 +771,7 @@ type AnthropicStreamEvent =
       index: number;
       content_block:
         | { type: 'text'; text: string }
+        | { type: 'thinking'; thinking: string }
         | { type: 'tool_use'; id: string; name: string; input: object };
     }
   | {
@@ -657,7 +779,9 @@ type AnthropicStreamEvent =
       index: number;
       delta:
         | { type: 'text_delta'; text: string }
-        | { type: 'input_json_delta'; partial_json: string };
+        | { type: 'thinking_delta'; thinking: string }
+        | { type: 'input_json_delta'; partial_json: string }
+        | { type: 'signature_delta'; signature: string };
     }
   | { type: 'content_block_stop'; index: number }
   | {

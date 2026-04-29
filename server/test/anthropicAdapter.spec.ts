@@ -281,26 +281,250 @@ describe('translateRequest', () => {
     expect(out.stop_sequences).toEqual(['END']);
   });
 
-  it('drops DeepSeek-specific stream_options + reasoning_content', () => {
-    // These would 400 on Anthropic. They should not appear in the
-    // translated body at all.
+  it('drops DeepSeek-specific stream_options', () => {
     const out = translateRequest({
       model: 'pa/claude-sonnet-4-6',
-      messages: [
-        { role: 'user', content: 'hi' },
-        {
-          role: 'assistant',
-          content: 'thinking out loud',
-          reasoning_content: 'private chain of thought from previous turn',
-        },
-      ],
+      messages: [{ role: 'user', content: 'hi' }],
       stream_options: { include_usage: true },
     } as OpenAIRequest);
-    // stream_options is not in the AnthropicRequest type; verify by
-    // serializing to JSON and checking the absence.
     const serialized = JSON.stringify(out);
     expect(serialized).not.toContain('stream_options');
-    expect(serialized).not.toContain('reasoning_content');
+  });
+});
+
+// =============================================================================
+// translateRequest — Extended Thinking (v0.1.50)
+// =============================================================================
+
+describe('translateRequest — extended thinking', () => {
+  it('strips -thinking suffix and enables thinking with default budget', () => {
+    const out = translateRequest({
+      model: 'pa/claude-sonnet-4-6-thinking',
+      messages: [{ role: 'user', content: 'hard problem' }],
+    });
+    expect(out.model).toBe('pa/claude-sonnet-4-6');
+    expect(out.thinking).toEqual({
+      type: 'enabled',
+      budget_tokens: 16_000,
+    });
+  });
+
+  it('non-thinking model passes through with no thinking field', () => {
+    const out = translateRequest({
+      model: 'pa/claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    expect(out.model).toBe('pa/claude-sonnet-4-6');
+    expect(out.thinking).toBeUndefined();
+  });
+
+  it('bumps max_tokens above thinking budget when client max_tokens is too small', () => {
+    const out = translateRequest({
+      model: 'pa/claude-opus-4-6-thinking',
+      max_tokens: 1024, // below the 16k budget — would 400 if forwarded
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    expect(out.max_tokens).toBe(16_000 + 4_096);
+  });
+
+  it('respects client max_tokens when already above thinking budget', () => {
+    const out = translateRequest({
+      model: 'pa/claude-opus-4-6-thinking',
+      max_tokens: 32_000,
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    expect(out.max_tokens).toBe(32_000);
+  });
+
+  it('drops temperature and top_p when thinking is enabled (Anthropic 400s otherwise)', () => {
+    const out = translateRequest({
+      model: 'pa/claude-sonnet-4-6-thinking',
+      temperature: 0.3,
+      top_p: 0.9,
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    expect(out.temperature).toBeUndefined();
+    expect(out.top_p).toBeUndefined();
+  });
+
+  it('translates assistant.reasoning_content into a leading thinking content block', () => {
+    const out = translateRequest({
+      model: 'pa/claude-sonnet-4-6-thinking',
+      messages: [
+        { role: 'user', content: 'first turn' },
+        {
+          role: 'assistant',
+          content: "Here's my answer.",
+          reasoning_content: 'Step 1: ...\nStep 2: ...',
+        },
+        { role: 'user', content: 'now follow up' },
+      ],
+    });
+    const asst = out.messages[1]!;
+    expect(asst.role).toBe('assistant');
+    const blocks = asst.content as Array<{ type: string; thinking?: string; text?: string }>;
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toEqual({
+      type: 'thinking',
+      thinking: 'Step 1: ...\nStep 2: ...',
+    });
+    expect(blocks[1]).toEqual({ type: 'text', text: "Here's my answer." });
+  });
+
+  it('preserves thinking block alongside tool_calls (thinking goes first)', () => {
+    const out = translateRequest({
+      model: 'pa/claude-sonnet-4-6-thinking',
+      messages: [
+        {
+          role: 'assistant',
+          content: 'Calling tool now.',
+          reasoning_content: 'Need to look this up.',
+          tool_calls: [
+            {
+              id: 'tu_a',
+              type: 'function',
+              function: { name: 'lookup', arguments: '{"q":"x"}' },
+            },
+          ],
+        },
+      ],
+    });
+    const blocks = out.messages[0]!.content as Array<{ type: string }>;
+    expect(blocks[0]!.type).toBe('thinking');
+    expect(blocks[1]!.type).toBe('text');
+    expect(blocks[2]!.type).toBe('tool_use');
+  });
+});
+
+// =============================================================================
+// translateResponse — Extended Thinking
+// =============================================================================
+
+describe('translateResponse — extended thinking', () => {
+  it('extracts thinking block content into reasoning_content field', () => {
+    const out = translateResponse({
+      id: 'msg_t',
+      type: 'message',
+      role: 'assistant',
+      model: 'pa/claude-sonnet-4-6',
+      content: [
+        { type: 'thinking', thinking: 'Pondering... 2 + 2 must be 4.' },
+        { type: 'text', text: 'The answer is 4.' },
+      ],
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+    expect(out.choices[0]!.message.reasoning_content).toBe(
+      'Pondering... 2 + 2 must be 4.',
+    );
+    expect(out.choices[0]!.message.content).toBe('The answer is 4.');
+  });
+
+  it('omits reasoning_content when no thinking blocks in response', () => {
+    const out = translateResponse({
+      id: 'msg_n',
+      type: 'message',
+      role: 'assistant',
+      model: 'x',
+      content: [{ type: 'text', text: 'just text' }],
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+      usage: { input_tokens: 3, output_tokens: 2 },
+    });
+    expect(out.choices[0]!.message.reasoning_content).toBeUndefined();
+  });
+});
+
+// =============================================================================
+// translateStream — Extended Thinking
+// =============================================================================
+
+describe('translateStream — extended thinking', () => {
+  it('emits thinking_delta as reasoning_content delta chunks', async () => {
+    const out = await streamThrough([
+      {
+        type: 'message_start',
+        message: { id: 'm', usage: { input_tokens: 3, output_tokens: 1 } },
+      },
+      {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'thinking', thinking: '' },
+      },
+      {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'thinking_delta', thinking: 'Hmm...' },
+      },
+      {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'thinking_delta', thinking: ' got it!' },
+      },
+      { type: 'content_block_stop', index: 0 },
+      {
+        type: 'content_block_start',
+        index: 1,
+        content_block: { type: 'text', text: '' },
+      },
+      {
+        type: 'content_block_delta',
+        index: 1,
+        delta: { type: 'text_delta', text: 'Answer: 4' },
+      },
+      { type: 'content_block_stop', index: 1 },
+      {
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn' },
+        usage: { output_tokens: 12 },
+      },
+      { type: 'message_stop' },
+    ]);
+
+    // Both thinking deltas should appear as reasoning_content fields.
+    expect(out).toContain('"reasoning_content":"Hmm..."');
+    expect(out).toContain('"reasoning_content":" got it!"');
+    // Then the text delta separately.
+    expect(out).toContain('"content":"Answer: 4"');
+    // Final stop chunk has finish_reason + usage.
+    expect(out).toContain('"finish_reason":"stop"');
+    expect(out.endsWith('data: [DONE]\n\n')).toBe(true);
+  });
+
+  it('ignores signature_delta events (signature not user-visible)', async () => {
+    const out = await streamThrough([
+      {
+        type: 'message_start',
+        message: { id: 'm', usage: { input_tokens: 1, output_tokens: 1 } },
+      },
+      {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'thinking', thinking: '' },
+      },
+      {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'thinking_delta', thinking: 'thinking' },
+      },
+      {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'signature_delta', signature: 'opaque-signature' },
+      },
+      { type: 'content_block_stop', index: 0 },
+      {
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn' },
+        usage: { output_tokens: 2 },
+      },
+      { type: 'message_stop' },
+    ]);
+
+    expect(out).toContain('"reasoning_content":"thinking"');
+    expect(out).not.toContain('signature');
+    expect(out).not.toContain('opaque-signature');
   });
 });
 
