@@ -816,15 +816,13 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
   {
     name: 'image_generate',
     description:
-      '生成真实的 raster 图像（PNG/JPEG，由 GPT Image 2 模型生成）。' +
+      '生成真实的 raster 图像（PNG/JPEG）。底层模型由用户在 Design TopBar 「生图」槽里选择：' +
+      'GPT Image 2（PPIO，欧美场景质量好但当前服务波动）、通义万相 Turbo（阿里，~10-15s 稳定出图，中文场景首选）、通义万相 Plus（高质量档）。' +
       '当用户要求"画一张图""做个 logo""生成插图""设计一张照片"等需要 *像素图像* 而非 *矢量代码* 的请求时调用。' +
       '当用户要求 UI 原型 / 流程图 / 图标矢量时不要用此工具——写 HTML/SVG/Mermaid 代码更合适。' +
       '调用后 Flaude 会自动把图片放进右侧 artifacts 面板，用户可以下载或分享。' +
-      // v0.1.59: 加超时 + 尺寸引导。Cloudflare Workers subrequest cap ~100s 是硬上限，' +
-      // 1536x1024 / 1024x1536 高分辨率经常超过这个，导致 image_generate timed out。' +
-      // 1024x1024 + medium quality 是最稳的组合。
-      '【重要】1024x1024 是最稳定的尺寸，几乎都能在 ~60s 内完成；1536x1024 / 1024x1536 在复杂中文 prompt 上经常超过 100s 触发 timed out——除非用户明确要竖版/横版，否则就用默认 1024x1024。' +
-      '【超时兜底】如果上一次调用 image_generate timed out，**不要重试同样的参数**（再次超时概率高）；要么换更小的 size + low quality，要么直接告诉用户图片服务暂时不稳定并继续后续工作（写占位图、HTML 排版等）。',
+      '【尺寸引导】1024x1024 是最稳定的尺寸；1536x1024 / 1024x1536 在 GPT Image 2 上经常超过 100s 触发 timed out（通义万相不受这个限制，但 1024x1024 仍是最快档）。除非用户明确要竖版/横版，否则用默认 1024x1024。' +
+      '【超时兜底】如果上一次调用 image_generate timed out 或 Failed to fetch，**不要重试同样的参数**——若是 GPT Image 2 失败，可以换成通义万相走另一条线（提示用户切换 Design 生图槽到 wanx2.1-t2i-turbo）；要么用占位图先把版面排出来，等服务恢复再生成。',
     parameters: {
       type: 'object',
       properties: {

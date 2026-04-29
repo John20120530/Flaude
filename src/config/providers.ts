@@ -123,6 +123,32 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = [
         capabilities: { tools: true },
         recommendedFor: ['code'],
       },
+      // v0.1.61: 通义万相文生图，作为 PPIO GPT Image 2 的备选/降级。
+      // 异步 API 由 Worker 提交+轮询，~10-15s 出图。比 GPT Image 2 在
+      // Cloudflare 100s subrequest cap 下稳定得多——尤其 PPIO 服务繁忙
+      // 时（实测 GPT Image 2 偶尔 120s+ 全失败，wanx-turbo 此时仍 14s 出图）。
+      // 同 QWEN_API_KEY（DashScope console 一个 key 通用）—— 用户已经为
+      // chat 配置了，不需要再加 key。
+      {
+        id: 'wanx2.1-t2i-turbo',
+        providerId: 'qwen',
+        displayName: '通义万相 Turbo（文生图）',
+        description:
+          '阿里 Tongyi Wanxiang 文生图。~10-15s 出图，¥0.14/张，适合中文场景。当 GPT Image 2 不稳时的稳定备选。',
+        contextWindow: 0, // image-gen, no context window
+        capabilities: { imageGen: true },
+        recommendedFor: ['design'],
+      },
+      {
+        id: 'wanx2.1-t2i-plus',
+        providerId: 'qwen',
+        displayName: '通义万相 Plus（文生图·高质量）',
+        description:
+          '通义万相高质量档。~15-30s 出图，¥0.40/张，色彩 / 细节比 turbo 更精细。',
+        contextWindow: 0,
+        capabilities: { imageGen: true },
+        recommendedFor: ['design'],
+      },
     ],
   },
   // 智谱 GLM 已下架（v0.1.51）。BigModel 的 OpenAI-compat 端点对工具调用经常

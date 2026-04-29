@@ -26,6 +26,11 @@ export interface Env {
   // model's key is missing.
   DEEPSEEK_API_KEY?: string;
   QWEN_API_KEY?: string;      // DashScope (Alibaba). Get at https://dashscope.console.aliyun.com
+  // v0.1.61: Tongyi Wanxiang image-gen reuses the DashScope key. Optional
+  // because most users have only set QWEN_API_KEY for chat — tools.ts
+  // falls back to QWEN_API_KEY when DASHSCOPE_API_KEY is unset, since
+  // both come from the same console and share auth scope.
+  DASHSCOPE_API_KEY?: string;
   // ZHIPU_API_KEY removed in v0.1.51 (Zhipu provider dropped). Leaving the
   // wrangler secret in production is harmless — nothing references it.
   MOONSHOT_API_KEY?: string;  // Moonshot Kimi. Get at https://platform.moonshot.cn
