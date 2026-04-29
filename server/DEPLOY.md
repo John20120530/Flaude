@@ -86,30 +86,54 @@ account. You want your own.
 
 ---
 
-## 2.5. Create the R2 bucket（v0.1.64+，可选但强烈推荐）
+## 2.5. Create the KV namespace（v0.1.65+，强烈推荐）
 
 `image_generate` 工具返回的图片 URL 由上游签发：PPIO 的 CDN URL TTL ~周级，
-Aliyun 通义万相的 OSS URL **24 小时硬过期**。没有 R2 bucket 时，Design 模式
-画布里的 `<img>` 一天后就全变 broken image。这一步开一个 R2 桶，Worker 自动
-把生成的图镜像到 R2 并改写返回 URL 成稳定的 `/api/image/<sha256>.png`。
+Aliyun 通义万相的 OSS URL **24 小时硬过期**。没有 KV namespace 时，Design 模式
+画布里的 `<img>` 一天后就全变 broken image。这一步开一个 KV namespace，Worker
+自动把生成的图镜像进去并改写返回 URL 成稳定的 `/api/image/<sha256>.png`。
+
+**为什么是 KV 不是 R2**：R2（更适合存二进制 blob）在 Cloudflare Dashboard
+强制要接受 "R2 Plan"——即使免费档也要绑信用卡，许多用户直接劝退。KV 包含在
+Workers Free plan 里，**不要信用卡**，限额 1 GB 存储 / 1k 写/天 / 100k 读/天 /
+单值最大 25 MB——对 5-10 人团队的图像生成量绰绰有余（每张图 1-2 MB，每天 50
+次生成是上限，里面还有 sha256 去重）。
 
 ```bash
-pnpm wrangler r2 bucket create flaude-images
+pnpm wrangler kv namespace create IMAGES
 ```
 
-桶名固定 `flaude-images`（[wrangler.toml](wrangler.toml) 里写死了；要改名同步两边）。
-R2 在免费额度内（10GB 存储 / 1M class-A ops / 10M class-B ops 每月）几乎不会
-花钱——一张 1024x1024 PNG ~1MB，10 用户每天 5 张算一年也才 ~18GB ≈ $0.27/月。
+输出会包含一行类似：
 
-**忘了开桶会怎样？** 不会崩。`mirrorImageUrl` 检测到 `env.IMAGES` 未定义时，
+```
+[[kv_namespaces]]
+binding = "IMAGES"
+id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+```
+
+把 `id` 复制粘贴到 [wrangler.toml](wrangler.toml) 的 `[[kv_namespaces]]` block，
+替换默认的 id（指向作者的 KV namespace，你的 Cloudflare 账户写不进去）。
+
+```toml
+[[kv_namespaces]]
+binding = "IMAGES"
+id = "YOUR-NEW-KV-ID-HERE"
+```
+
+**忘了开 KV 会怎样？** 不会崩。`mirrorImageUrl` 检测到 `env.IMAGES` 未定义时，
 透明返回上游原 URL，行为退化到 v0.1.63 的"24h 后图片失效"——比 hard fail 强，
 但 Design 模式长期可用性会受影响。看 Worker 日志能搜到 `mirrorImageUrl: ...`
 警告就知道是这个原因。
 
-**已经发了 Worker 但忘了 R2？** 跑上面的 `r2 bucket create` 命令，再 `pnpm
-deploy` 一次让 Worker 重新读 wrangler.toml 拿到新 binding。**之前生成的图
-不会回填**——R2 mirror 是请求时触发的，老对话里的过期 URL 仍然过期，需要
+**已经发了 Worker 但忘了 KV？** 跑上面的 `kv namespace create` 命令，把 id 填到
+wrangler.toml，再 `pnpm deploy` 一次让 Worker 重新加载 binding。**之前生成的图
+不会回填**——KV mirror 是请求时触发的，老对话里的过期 URL 仍然过期，需要
 让模型重新生成一次。
+
+**KV 容量超了怎么办？** 1 GB 大概能存 1000 张 1MB 图。超了之后 PUT 会开始
+失败，`mirrorImageUrl` 自动 fallback 回上游原 URL（24h 过期回归）。监控指标
+在 Cloudflare Dashboard → Workers & Pages → KV → 你的 namespace。如果真撑爆，
+要么 (a) 升级到 R2（接受信用卡，10 GB 免费），(b) 加 cron 删除最旧的图。
 
 ---
 

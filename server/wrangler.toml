@@ -28,22 +28,30 @@ database_name = "flaude"
 database_id = "581ea3d1-b37c-45f2-8935-e832e47ae21c"
 
 # -----------------------------------------------------------------------------
-# R2 binding — backs /api/image/<key> and the image_generate mirror pipeline
+# KV binding — backs /api/image/<key> and the image_generate mirror pipeline
 # (server/src/imageProxy.ts). Without this binding, image_generate transparently
 # falls back to returning the upstream provider URL (PPIO CDN / Aliyun OSS),
 # which works for ~24h-7d before the signed URL expires and the design canvas
-# image goes broken. Adding the binding is the v0.1.64 root-cause fix.
+# image goes broken. Adding the binding is the v0.1.65 root-cause fix.
+#
+# Why KV instead of R2 (which is the natural choice for binary blobs):
+# R2 requires a "Purchase R2 Plan" click-through in the Cloudflare Dashboard
+# that wants a credit card on file even for free-tier usage. KV is included
+# in the Workers Free plan with no credit card and limits 1 GB storage /
+# 1k writes-day / 100k reads-day — comfortable for a 5-10 user team where
+# image generation is bounded by upstream provider cost (~$0.04-0.20 per
+# image). Per-value cap is 25 MB vs R2's effectively-unlimited; our images
+# are 1-2 MB so we have headroom. KV API differences from R2 are minor —
+# see imageProxy.ts comments.
 #
 # First-time setup:
-#   1. `pnpm wrangler r2 bucket create flaude-images`
-#   2. (optional) `pnpm wrangler r2 bucket cors set flaude-images --rules ...`
-#      We don't strictly need this — images are served via the Worker, not
-#      directly from R2's public URL, so the bucket can stay private.
+#   1. `pnpm wrangler kv namespace create IMAGES`
+#   2. Copy the printed `id` into the line below.
 #   3. Deploy the worker; new image_generate calls auto-mirror going forward.
 # -----------------------------------------------------------------------------
-[[r2_buckets]]
+[[kv_namespaces]]
 binding = "IMAGES"
-bucket_name = "flaude-images"
+id = "e4a7823610e148968a4fea0a007faab1"
 
 # -----------------------------------------------------------------------------
 # Public config.
