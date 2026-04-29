@@ -3,7 +3,7 @@
  *
  * Responsibilities:
  *   - Render the latest design block in a sandboxed iframe.
- *   - Let the user flip between mobile / tablet / desktop breakpoints.
+ *   - Let the user flip between mobile / desktop breakpoints.
  *   - Toggle between rendered preview and source code view.
  *   - Trigger downloads: full HTML file, or 2x retina PNG.
  *
@@ -31,7 +31,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Smartphone,
-  Tablet,
   Monitor,
   Code as CodeIcon,
   Eye,
@@ -61,18 +60,16 @@ interface Props {
   streaming?: boolean;
 }
 
-type Breakpoint = 'mobile' | 'tablet' | 'desktop';
+type Breakpoint = 'mobile' | 'desktop';
 type ViewMode = 'preview' | 'code';
 
 const BREAKPOINT_PX: Record<Breakpoint, number | null> = {
   mobile: 390, // iPhone 14/15 portrait — the "designed for mobile first" reference
-  tablet: 820, // iPad portrait — covers most "tablet" media-query thresholds
   desktop: null, // null → fills the available width (responsive flex)
 };
 
 const BREAKPOINT_LABEL: Record<Breakpoint, string> = {
   mobile: '手机',
-  tablet: '平板',
   desktop: '桌面',
 };
 
@@ -186,9 +183,8 @@ export default function DesignCanvas({ blocks, streaming }: Props) {
       <div className="h-11 shrink-0 px-3 flex items-center gap-2 border-b border-claude-border dark:border-night-border bg-claude-surface dark:bg-night-surface">
         {/* Breakpoint cluster — segmented control style. */}
         <div className="flex items-center rounded-lg border border-claude-border dark:border-night-border overflow-hidden">
-          {(['mobile', 'tablet', 'desktop'] as const).map((bp) => {
-            const Icon =
-              bp === 'mobile' ? Smartphone : bp === 'tablet' ? Tablet : Monitor;
+          {(['mobile', 'desktop'] as const).map((bp) => {
+            const Icon = bp === 'mobile' ? Smartphone : Monitor;
             return (
               <button
                 key={bp}

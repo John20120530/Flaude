@@ -34,6 +34,7 @@ import {
 } from './auth';
 import chat from './chat';
 import type { AppContext, Env } from './env';
+import imageProxy from './imageProxy';
 import mcpDemo from './mcpDemo';
 import mcpsSearch from './mcpsSearch';
 import { requireAuth } from './middleware';
@@ -281,6 +282,19 @@ app.route('/', mcpsSearch);
 // a single network round-trip. Same mount-before-chat rule.
 // -----------------------------------------------------------------------------
 app.route('/', skillsBundle);
+
+// -----------------------------------------------------------------------------
+// Image proxy (./imageProxy.ts).
+//   GET /api/image/<sha256>.<ext>
+//
+// Public read endpoint for R2-mirrored generated images. Mounted before
+// chat so requireAuth (which is wired inside the chat sub-app's '*'
+// middleware) doesn't gate <img> requests — the design canvas iframe
+// is null-origin and won't carry a Bearer token. The URL is content-
+// addressable so leaking it leaks the bytes (which the user generated
+// + chose to embed in their design), not a credential.
+// -----------------------------------------------------------------------------
+app.route('/', imageProxy);
 
 // -----------------------------------------------------------------------------
 // Chat proxy + /usage (mounted from ./chat.ts — requireAuth is applied inside

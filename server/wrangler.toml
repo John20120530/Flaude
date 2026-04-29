@@ -28,6 +28,24 @@ database_name = "flaude"
 database_id = "581ea3d1-b37c-45f2-8935-e832e47ae21c"
 
 # -----------------------------------------------------------------------------
+# R2 binding — backs /api/image/<key> and the image_generate mirror pipeline
+# (server/src/imageProxy.ts). Without this binding, image_generate transparently
+# falls back to returning the upstream provider URL (PPIO CDN / Aliyun OSS),
+# which works for ~24h-7d before the signed URL expires and the design canvas
+# image goes broken. Adding the binding is the v0.1.64 root-cause fix.
+#
+# First-time setup:
+#   1. `pnpm wrangler r2 bucket create flaude-images`
+#   2. (optional) `pnpm wrangler r2 bucket cors set flaude-images --rules ...`
+#      We don't strictly need this — images are served via the Worker, not
+#      directly from R2's public URL, so the bucket can stay private.
+#   3. Deploy the worker; new image_generate calls auto-mirror going forward.
+# -----------------------------------------------------------------------------
+[[r2_buckets]]
+binding = "IMAGES"
+bucket_name = "flaude-images"
+
+# -----------------------------------------------------------------------------
 # Public config.
 # Secrets (JWT_SECRET, upstream provider keys later) are NOT here — they go
 # in `.dev.vars` locally, or `wrangler secret put NAME` for production.

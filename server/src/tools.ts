@@ -18,6 +18,7 @@
 import { Hono, type Context } from 'hono';
 
 import type { AppContext } from './env';
+import { mirrorImageUrl } from './imageProxy';
 import { requireAuth } from './middleware';
 
 const tools = new Hono<AppContext>();
@@ -394,6 +395,18 @@ tools.post('/tools/image_generate', async (c) => {
     );
   }
 
+  // v0.1.64: mirror to R2 so the URL outlives the upstream's signed-URL
+  // TTL. mirrorImageUrl returns the original URL on any failure, so a
+  // missing R2 binding / network blip / oversized image just degrades
+  // back to pre-v0.1.64 behavior without throwing. Run the N (typically 1)
+  // mirrors in parallel — each is bounded by MIRROR_TIMEOUT_MS internally
+  // so the worst case adds ~8s to the response time, well within the
+  // 100s subrequest cap on top of PPIO's 60-120s gen latency.
+  const origin = new URL(c.req.url).origin;
+  const mirroredUrls = await Promise.all(
+    urls.map((u) => mirrorImageUrl(c.env, c.executionCtx, u, origin)),
+  );
+
   // Best-effort usage logging. Don't block the response on it — if D1
   // is slow we'd rather ship the image URLs and let the row write
   // settle in waitUntil.
@@ -415,7 +428,7 @@ tools.post('/tools/image_generate', async (c) => {
 
   return c.json({
     prompt,
-    urls,
+    urls: mirroredUrls,
     model: 'gpt-image-2',
     size,
     quality,
@@ -473,13 +486,20 @@ async function handleWanx(
   // DashScope wanx accepts size as e.g. "1024*1024" (asterisk, NOT 'x').
   // We accept the same gpt-image-2-style sizes from the client and
   // translate. 'auto' falls back to 1024*1024.
+  //
+  // v0.1.64: wanx2.1 rejects width OR height >1440 with HTTP 400
+  // "Either width or height should be between 512 and 1440." The
+  // gpt-image-2 sizes 1024x1536 / 1536x1024 hit that ceiling, so when
+  // the user (or model) picks them we clamp the long edge to 1440. The
+  // ratio shifts from 3:2 to ~1.4:1 — visually similar enough that
+  // we'd rather quietly downsize than hard-fail.
   const wanxSize =
     size === '1024x1024' || size === 'auto'
       ? '1024*1024'
       : size === '1024x1536'
-        ? '1024*1536'
+        ? '1024*1440'
         : size === '1536x1024'
-          ? '1536*1024'
+          ? '1440*1024'
           : '1024*1024';
 
   // Step 1 — submit. AbortController ceiling 30s for the submit alone;
@@ -598,6 +618,15 @@ async function handleWanx(
     );
   }
 
+  // v0.1.64: mirror to R2. Critical here because wanx's OSS URLs hard-
+  // expire after 24h — the original 24h-broken-image bug we set out to
+  // root-cause. Same Promise.all + per-image timeout shape as the PPIO
+  // path so wanx doesn't get a different fallback policy.
+  const origin = new URL(c.req.url).origin;
+  const mirroredUrls = await Promise.all(
+    urls.map((u) => mirrorImageUrl(c.env, c.executionCtx, u, origin)),
+  );
+
   // Best-effort usage log — same shape as gpt-image-2 path so admin
   // dashboards can sum image-gen activity across providers without a
   // schema change.
@@ -618,7 +647,7 @@ async function handleWanx(
 
   return c.json({
     prompt,
-    urls,
+    urls: mirroredUrls,
     model,
     size,
     quality: 'auto', // wanx doesn't expose a quality tier; echo something stable
