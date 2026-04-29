@@ -443,6 +443,54 @@ describe('applyPulledConversations', () => {
     expect(conv.messages.map((m) => m.content)).toEqual(['hi']);
   });
 
+  it('preserves design mode from server (v0.1.56 regression)', () => {
+    // Pre-v0.1.56 the whitelist was `(p.mode === 'chat' || p.mode === 'code')`
+    // and silently rewrote every Design conversation to Chat on every pull —
+    // a user with 4 design convs noticed them disappearing into the Chat tab.
+    // This test pins the fix: design must be preserved as design.
+    useAppStore.getState().applyPulledConversations([
+      {
+        id: 'srv-design',
+        title: '画一个红苹果',
+        mode: 'design',
+        pinned: false,
+        starred: false,
+        modelId: 'qwen3-vl-plus',
+        createdAt: 100,
+        updatedAt: 200,
+        messages: [],
+      },
+    ]);
+    const conv = useAppStore
+      .getState()
+      .conversations.find((c) => c.id === 'srv-design')!;
+    expect(conv.mode).toBe('design');
+  });
+
+  it('falls back to chat for unknown future modes (graceful degrade)', () => {
+    // If the server ever ships a row whose mode predates the client's
+    // catalog (e.g. a hypothetical 'agent' mode added on the server first),
+    // we degrade to chat rather than crash. The fallback used to be
+    // unconditional; v0.1.56 still keeps it but only for genuinely unknown
+    // values, not for plain 'design'.
+    useAppStore.getState().applyPulledConversations([
+      {
+        id: 'srv-future',
+        title: 'from the future',
+        mode: 'agent-2030' as unknown as 'chat',
+        pinned: false,
+        starred: false,
+        createdAt: 100,
+        updatedAt: 200,
+        messages: [],
+      },
+    ]);
+    const conv = useAppStore
+      .getState()
+      .conversations.find((c) => c.id === 'srv-future')!;
+    expect(conv.mode).toBe('chat');
+  });
+
   it('keeps local when local.updatedAt > server.updatedAt (LWW)', () => {
     useAppStore.setState({
       conversations: [
