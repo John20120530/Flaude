@@ -115,8 +115,48 @@ export default function DesignCanvas({ blocks, streaming }: Props) {
   // composer. `srcdoc` is reactive: changing the prop swaps the iframe doc.
   const srcDoc = useMemo(() => {
     if (!block) return '';
-    return buildDesignDocument(block, { injectExportBridge: false });
+    return buildDesignDocument(block, {
+      injectExportBridge: false,
+      injectAutoHeight: true,
+    });
   }, [block]);
+
+  // v0.1.66: iframe height tracking. The injected AUTO_HEIGHT_SCRIPT inside
+  // the iframe posts its body's scrollHeight back here on load + on every
+  // ResizeObserver tick + on every img load. We read that, clamp it sane
+  // (avoid 0-height while srcdoc is initializing, avoid runaway tall),
+  // and apply as inline style.height on the iframe element. The wrapper
+  // card sizes to the iframe, no more white strip below.
+  const [iframeHeight, setIframeHeight] = useState<number | null>(null);
+  // Reset measured height whenever the rendered block swaps — otherwise we
+  // briefly show the prior block's height while the new one paints.
+  useEffect(() => {
+    setIframeHeight(null);
+  }, [block?.messageId]);
+  useEffect(() => {
+    function onMessage(e: MessageEvent) {
+      // Sandboxed null-origin iframe means we can't usefully filter by
+      // e.origin (it's "null"). Filter by source instead — only listen to
+      // *our* preview iframe, not other iframes that might exist on the page.
+      if (
+        previewIframeRef.current &&
+        e.source !== previewIframeRef.current.contentWindow
+      ) {
+        return;
+      }
+      if (e.data && e.data.type === 'flaude-iframe-height') {
+        const h = Number(e.data.height);
+        if (Number.isFinite(h) && h > 0) {
+          // 8000px ceiling defends against a runaway design (huge gallery
+          // with min-height:200vh kind of thing) eating the page; user can
+          // still scroll inside the iframe via internal scroll.
+          setIframeHeight(Math.max(200, Math.min(8000, Math.round(h))));
+        }
+      }
+    }
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, []);
 
   // Reset export error when a new block arrives — stale "html2canvas timeout"
   // messages from the previous version would just confuse the user.
@@ -309,12 +349,19 @@ export default function DesignCanvas({ blocks, streaming }: Props) {
       {/* Render area */}
       <div className="flex-1 min-h-0 overflow-auto p-4 flex items-start justify-center bg-[radial-gradient(circle,rgba(0,0,0,0.04)_1px,transparent_1px)] [background-size:18px_18px] dark:bg-[radial-gradient(circle,rgba(255,255,255,0.04)_1px,transparent_1px)]">
         {viewMode === 'preview' ? (
+          // v0.1.66: wrapper drops minHeight:100%. The iframe's measured
+          // body height (via the AUTO_HEIGHT_SCRIPT bridge) is applied
+          // inline below, and the wrapper sizes to it. Result: no white
+          // strip below short designs (the dotted-pattern bg of the render
+          // area shows through where the wrapper used to extend white).
+          // While we wait for the first height post (iframeHeight==null),
+          // we keep a 600px fallback so the iframe doesn't briefly collapse.
           <div
             className="bg-white shadow-xl rounded-md overflow-hidden ring-1 ring-black/5 transition-[width] duration-200 ease-out"
             style={
               widthPx
-                ? { width: `${widthPx}px`, minHeight: '100%', maxWidth: '100%' }
-                : { width: '100%', minHeight: '100%' }
+                ? { width: `${widthPx}px`, maxWidth: '100%' }
+                : { width: '100%' }
             }
           >
             <iframe
@@ -322,7 +369,8 @@ export default function DesignCanvas({ blocks, streaming }: Props) {
               title="Design preview"
               sandbox="allow-scripts"
               srcDoc={srcDoc}
-              className="w-full h-full min-h-[600px] border-0 block"
+              className="w-full border-0 block"
+              style={{ height: iframeHeight ? `${iframeHeight}px` : '600px' }}
             />
           </div>
         ) : (
