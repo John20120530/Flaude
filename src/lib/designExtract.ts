@@ -218,24 +218,36 @@ export function allDesignBlocks(conv: Conversation): DesignBlock[] {
  * `injectExportBridge` adds a tiny postMessage listener so the parent window
  * can request a PNG capture via html2canvas. We only inject it when the
  * caller wants export — keeps the "preview" pipeline minimal.
+ *
+ * `injectAutoHeight` (v0.1.66) adds a second postMessage emitter that posts
+ * `document.documentElement.scrollHeight` to the parent on load + on every
+ * subsequent layout change. The DesignCanvas listens and resizes the
+ * iframe element to match — without this, iframe element height is
+ * controlled purely by CSS (h-full + min-h-[600px]) and a short design
+ * leaves a white strip below the body's actual content (because the
+ * wrapper card's bg-white shows through where the iframe is taller than
+ * its body). We only inject for preview, not for the downloaded HTML
+ * file (the postMessage call is dead code outside Flaude's iframe).
  */
 export function buildDesignDocument(
   block: DesignBlock,
-  options: { injectExportBridge?: boolean } = {}
+  options: { injectExportBridge?: boolean; injectAutoHeight?: boolean } = {}
 ): string {
-  const bridge = options.injectExportBridge ? EXPORT_BRIDGE_SCRIPT : '';
+  const bridges =
+    (options.injectExportBridge ? EXPORT_BRIDGE_SCRIPT : '') +
+    (options.injectAutoHeight ? AUTO_HEIGHT_SCRIPT : '');
   switch (block.format) {
     case 'html': {
-      // The model emitted a full document. Insert the bridge just before
-      // </body> so it doesn't fight the page's own scripts.
-      if (!bridge) return block.content;
-      return injectBeforeBodyEnd(block.content, bridge);
+      // The model emitted a full document. Insert the bridges just before
+      // </body> so they don't fight the page's own scripts.
+      if (!bridges) return block.content;
+      return injectBeforeBodyEnd(block.content, bridges);
     }
     case 'svg':
       return `<!doctype html><html><head><meta charset="utf-8"><style>
         html,body{margin:0;padding:24px;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#fafaf7}
         svg{max-width:100%;max-height:100%;height:auto;width:auto}
-      </style></head><body>${block.content}${bridge}</body></html>`;
+      </style></head><body>${block.content}${bridges}</body></html>`;
     case 'mermaid':
       return `<!doctype html><html><head><meta charset="utf-8"><style>
         html,body{margin:0;padding:24px;background:#fafaf7;font-family:system-ui}
@@ -243,7 +255,7 @@ export function buildDesignDocument(
       <div class="mermaid">${escapeHtml(block.content)}</div>
       <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
       <script>mermaid.initialize({startOnLoad:true, theme:'neutral'});</script>
-      ${bridge}
+      ${bridges}
       </body></html>`;
     case 'jsx':
       return `<!doctype html><html><head><meta charset="utf-8">
@@ -258,10 +270,59 @@ export function buildDesignDocument(
         const __Root = typeof App !== 'undefined' ? App : null;
         if (__Root) ReactDOM.createRoot(document.getElementById('root')).render(<__Root />);
       </script>
-      ${bridge}
+      ${bridges}
       </body></html>`;
   }
 }
+
+/**
+ * Auto-height bridge — posts the rendered document height back to the
+ * parent (DesignCanvas) so the parent can size the iframe element to
+ * exactly fit its content. Without this the iframe is whatever CSS
+ * height we give it (h-full + min-h-[600px]), and any design shorter
+ * than the wrapper card's height shows a white strip at the bottom
+ * (the bit of the iframe element below the body's actual content).
+ *
+ * Triggers re-post on:
+ *   - `load` event (initial paint with all subresources, including
+ *     remote images from /api/image/<sha>... that arrive async)
+ *   - ResizeObserver on documentElement (catches Tailwind's CDN-hot-
+ *     swapped styles, container queries, viewport-bound layouts)
+ *   - bubbled `load` events from descendant <img> tags (catches the
+ *     case where layout was already settled but an image just finished
+ *     decoding and pushed body taller)
+ *
+ * postMessage target is `*` because the iframe is sandboxed without
+ * `allow-same-origin`, so `parent.location.origin` reads as `null`
+ * and a strict origin check would just discard our own messages.
+ */
+const AUTO_HEIGHT_SCRIPT = `<script>
+(function(){
+  function postHeight(){
+    try {
+      var de = document.documentElement;
+      var b  = document.body;
+      var h = Math.max(
+        de ? de.scrollHeight : 0,
+        b  ? b.scrollHeight  : 0,
+        de ? de.offsetHeight : 0,
+        b  ? b.offsetHeight  : 0
+      );
+      parent.postMessage({type:'flaude-iframe-height', height: Math.ceil(h)}, '*');
+    } catch(e) {}
+  }
+  if (document.readyState === 'complete') postHeight();
+  else window.addEventListener('load', postHeight);
+  // Catch dynamic layout shifts (CDN tailwind, container queries, etc).
+  if (typeof ResizeObserver !== 'undefined') {
+    try { new ResizeObserver(postHeight).observe(document.documentElement); } catch(e) {}
+  }
+  // Catch async <img> loads pushing body taller after initial paint.
+  document.addEventListener('load', function(e){
+    if (e.target && e.target.tagName === 'IMG') postHeight();
+  }, true);
+})();
+</script>`;
 
 /**
  * Postscript html2canvas + listener. Loaded lazily — the canvas only injects
